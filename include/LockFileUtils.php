@@ -19,12 +19,52 @@ class LockFileUtils
         $fl = flock($fp, LOCK_EX | LOCK_NB);
 
         if ($fl) {
+            // Stamp the file at the moment the lock is actually acquired. fopen('c+b') does
+            // not touch the mtime of a file that already exists, so without this an orphaned
+            // lock file left behind by a hard-killed run would keep its old mtime and make
+            // the next (perfectly healthy) holder look stalled to the age checks below.
+            // The timestamp is passed explicitly on purpose: touch() without one asks the
+            // OS for "now" via utime(path, NULL), which the VMware shared-folder driver
+            // (fuse.vmhgfs-fuse, used for the dev VM mount) gets wrong - it stamps the
+            // file with epoch+1s and still returns true, making every lock look ancient.
+            touch($lockFilePath, time());
+            clearstatcache(true, $lockFilePath);
             self::$lockList[$lockFilePath] = $fp;
         } else {
             fclose($fp);
         }
 
         return $fl;
+    }
+
+    /**
+     * Whether the lock is held by THIS process, i.e. it was acquired here and not yet
+     * released. Used to make sure a run only ever releases a lock it owns.
+     *
+     * @param string $lockFilePath
+     * @return bool
+     */
+    public static function isOwnLock(string $lockFilePath): bool
+    {
+        return isset(self::$lockList[$lockFilePath]);
+    }
+
+    /**
+     * Age in seconds of the lock file, or null when there is no lock file at all.
+     * Read-only: it never creates, opens or locks anything, so it is safe to call from a
+     * watchdog that must not compete with the process it is watching.
+     *
+     * @param string $lockFilePath
+     * @return int|null
+     */
+    public static function lockAge(string $lockFilePath): int|null
+    {
+        clearstatcache(true, $lockFilePath);
+        if (!file_exists($lockFilePath) || ($mTime = filemtime($lockFilePath)) === false) {
+            return null;
+        }
+
+        return time() - $mTime;
     }
 
     public static function releaseLock(string $lockFilePath): bool

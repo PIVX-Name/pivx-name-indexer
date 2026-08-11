@@ -22,6 +22,10 @@ $replacements = [
     '{:notify_tg_bot_key:}' => getenv('NOTIFY_TG_BOT_KEY') ?: '',
     '{:notify_tg_user_id:}' => getenv('NOTIFY_TG_USER_ID') ?: '',
     '{:logs_path:}' => getenv('LOGS_PATH') ?: '/var/log/indexer',
+    // Cast through (int) so a stray value cannot inject PHP into the generated config —
+    // these land unquoted in a `const` declaration.
+    '{:evm_throttling:}' => (string)(int)(getenv('EVM_THROTTLING') ?: 0),
+    '{:evm_batch_size:}' => (string)max(1, (int)(getenv('EVM_BATCH_SIZE') ?: 10)),
 ];
 
 $content = strtr($template, $replacements);

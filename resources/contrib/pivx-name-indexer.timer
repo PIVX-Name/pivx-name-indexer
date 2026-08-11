@@ -2,8 +2,17 @@
 Description=PIVX Name Indexer Periodic Sync Timer
 
 [Timer]
-OnBootSec=1min
-OnUnitInactiveSec=30s
+Unit=pivx-name-indexer.service
+
+# First run 2 minutes after boot, so the database, rr-proxy and network are settled
+# before the first sync attempt.
+OnBootSec=2min
+
+# Then once a minute. Measured from ACTIVATION rather than from completion
+# (OnUnitInactiveSec), so the cadence stays a steady minute instead of becoming
+# "runtime + interval" and drifting further apart the longer a run takes.
+OnUnitActiveSec=1min
+
 AccuracySec=1s
 
 [Install]

@@ -2,12 +2,15 @@
 
 use Indexer\Database;
 use Indexer\SparseMerkleTree;
+use Denpa\Bitcoin\Client as RpcClient;
+use Denpa\Bitcoin\Exceptions\BadRemoteCallException;
+use Denpa\Bitcoin\Responses\BitcoindResponse;
 
 function logEvent(string $text, string $tag = '', string $file = 'debug'): void
 {
     if (DEBUG || str_contains($file, 'debug') === false) {
         file_put_contents(
-            WORKLOGS_PATH . '/' . $file . '.log',
+            WORKLOGS_PATH . '/' . PROJECT_NAME . '-' . $file . '.log',
             date('Y-m-d H:i:s') . ($tag !== '' ? ' - ' . $tag : '') . ': ' . $text . PHP_EOL,
             FILE_APPEND
         );
@@ -99,6 +102,7 @@ function getXATXList(string $type, Database $db): array
         throw new RuntimeException('Can\'t query XA RECOVER', INT_EXC_DB);
     }
 
+    $type = PROJECT_NAME . '-' . $type;
     $result = [];
 
     while ($r = $qr->fetch_assoc()) {
@@ -123,7 +127,7 @@ function getXATXList(string $type, Database $db): array
  */
 function checkUncommitedXATX(string $type, Database $db, SparseMerkleTree $smt, string $logfileName): bool
 {
-    if (($xaList = getXATxList($type, $db)) !== []) {
+    if (($xaList = getXATXList($type, $db)) !== []) {
         if (count($xaList) === 1) {
             logEvent(
                 'Found uncommited TX (' . implode(',', $xaList[0]) . '), checking...',
@@ -132,7 +136,7 @@ function checkUncommitedXATX(string $type, Database $db, SparseMerkleTree $smt, 
             );
 
             $xaOldRoot = $xaList[0][0];
-            $xaCurrentRoot = bin2hex(pack('C*', ...$smt->getRoot()));
+            $xaCurrentRoot = $smt->getRootHex();
             $txCommand = $xaOldRoot === $xaCurrentRoot ? 'ROLLBACK' : 'COMMIT';
             if ($db->query('XA ' . $txCommand . ' \'' . implode('\',\'', $xaList[0]) . '\'', retries: 0) === false) {
                 throw new RuntimeException('Can\'t commit XA transaction (consistency check)', INT_EXC_DB);
@@ -165,4 +169,36 @@ function formatXATXList(array $xaTXes): string
     }
 
     return implode(' / ', $parts);
+}
+
+/**
+ * @param RpcClient $rpc
+ * @return void
+ * @throws RuntimeException
+ * @throws BadRemoteCallException
+ */
+function assertNodeIsGood(RpcClient $rpc): void
+{
+    // check mnsync to prevent false data
+    /** @var BitcoindResponse $response */
+    $response = $rpc->request('mnsync', 'status');
+    $mnSync = $response->get();
+    if (!isset($mnSync['RequestedMasternodeAssets']) || $mnSync['RequestedMasternodeAssets'] !== 999) {
+        throw new RuntimeException('Blockchain node is not synced');
+    }
+    // END check mnsync
+
+    // let's check that the node has the INCOME_WALLET viewing key imported, otherwise stop
+    $response = $rpc->request('listshieldaddresses', true);
+    $addrList = $response->get();
+    if (is_string($addrList)) {
+        $addrList = (array)$addrList;
+    }
+    $addrList = array_flip($addrList);
+    if (!isset($addrList[INCOME_WALLET])) {
+        throw new RuntimeException(
+            'The Registrar INCOME_WALLET viewing key is not imported in the Blockchain Node. Stopping...',
+            INT_EXC_FATAL
+        );
+    }
 }

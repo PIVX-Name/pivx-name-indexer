@@ -1,7 +1,10 @@
+/.claude/
 /.idea/
 /vendor/
 /registrar/
 /config/*.php
-composer.lock
 release_type
 *.bak
+/resources/tests/
+/resources/tools/
+BACKLOG.md

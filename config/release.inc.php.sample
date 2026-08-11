@@ -17,27 +17,50 @@ const RPC_CONFIG = [
 ];
 
 // Do not forget to add proper RPC URL(s) to db table rpc_list: chain_id=>rpc_url
+// Give each row a distinct issue_ts (0, 1, 2, …): the indexer picks the lowest and
+// has no tiebreaker, so equal values make the choice arbitrary and endpoint problems
+// unreproducible. A failing endpoint is stamped with time(), which sorts far behind
+// these seeds.
 const EVM_NETWORK = [
-    'chain_id' => 421614,
-    'contract_address' => '0x237534d7e4c7fa21651befd770d76525c78194c3',
-    'abi' => __DIR__ . '/../resources/arbitrum.abi',
+    'chain_id' => 56,
+    'contract_address' => '',
+    'abi' => __DIR__ . '/../resources/evm-anchor.abi',
 ];
 
-const INDEXER_ROCKSDB_PROXY_SOCKET_PATH = 'unix:///opt/rr-proxy/indexer.sock';
+const INDEXER_ROCKSDB_PROXY_SOCKET_PATH = 'unix:///run/rr-proxy/pivx-indexer.sock';
 
 // Main on-chain init data
-const SMT_GENESIS_ROOT = 'b4c9dacf8e194e353dce7638d76f282fe40399f7b0ad74a2229a6d4f5be774de';
-// payment processing wallet's start block
-const PIVX_GENESIS_BLOCK = 26970;
+// The empty registry. In the compact SMT an empty subtree is 32 zero bytes at every
+// height, so the root of an empty tree is all zeros - this is what a freshly started
+// rr-proxy reports, and what any third party replaying from COIN_GENESIS_BLOCK computes.
+// It MUST match the genesis root the anchor contract was deployed with.
+const SMT_GENESIS_ROOT = '0000000000000000000000000000000000000000000000000000000000000000';
+// payment processing wallet's birthday: the block before which no service transaction can
+// exist, which is what makes the empty tree above the correct starting state.
+const COIN_GENESIS_BLOCK = 3429124;
 
-// let it be the contract creation block ;)
-const EVM_GENESIS_BLOCK = 282263876;
-const EVM_GENESIS_TX_HASH = '0x8da1a4ed8e4b521f7cc1353ffeefbc4c95100ca7bbc00cf9c04fb65068bb865e';
 
-const EVM_SYNC_BLOCK_STEP = 100000;
+// Microseconds to sleep after each eth_call. 0 disables it.
+//
+// The limit on public endpoints is per-second CONCURRENCY, not total volume:
+// 600 sequential calls succeed where 100 fired at once do not. Discovery is
+// already sequential, so 0 is right for most endpoints; raise it only if one
+// starts answering "limit exceeded". 200000 = 0.2s.
+const EVM_THROTTLING = {:evm_throttling:};
 
-const INCOME_WALLET = 'pts1xnwg2pdn7q82e9uqchyzazut5j7mcef20mg7jkpyk00zry9ep470d3qre69rvwwgcxljyf84agw';
-const INCOME_WALLET_VK = 'ptxviews1qw2n93vhqqqqpqq3ckkys47598pfsltzy7wvny8cqkg892zpm9503exypaaapa9953m973a96pa9tkq29pqfflf7yx5xl7ylelundfvrtgrlrcd0xvlrj6syymlr4xgdsex269vm7rgu0matd3cdk556ywjztdnewq4q2qjt0c8pmgws8ser6x4zzw6zgxyhz2gznugfjrj0vjvznr4s3vmjyx6yq00l6els5pp5w8trvzfxkp6htxmdwa02apm57zh9yhs02w36euglf3564';
+// Checkpoints fetched and persisted per database transaction. Bounds how much
+// work is lost if an endpoint dies mid-run: at most one chunk, since the ascending
+// walk resumes from the highest stored index.
+const EVM_BATCH_SIZE = {:evm_batch_size:};
+
+// PIVX network this deployment speaks. MUST match the circuit the prover was built with:
+//   'mainnet' -> plain `cargo prove build`      (addresses ps1…,  marker PiNS:1:)
+//   'testnet' -> `cargo prove build --features testnet` (pts1…, marker tPiNS:1:)
+// Derived from the INCOME_WALLET prefix below (pts1…) when this file was generated.
+const COIN_NETWORK = 'mainnet';
+
+const INCOME_WALLET = 'ps1rf97n020fhwycx2nnxfm97ufeyygk9q64h96e5dx304lreg9zl53sas6g3c9gnlfpqw5s4u3zsh';
+const INCOME_WALLET_VIEW_KEY = 'pxviews1qwz6qt2gqqqqpqpyt8fy0k64xunn9fgekcgrukw6lqvks83f2j65qrfjgehv3sqqdvy6xsz3m00yfdg5rg56z04q9uw8z9uwyjnzrh0wn63a6gga3r9jw6rm44rqykywnzxuw20yjq5hn8e09cu4h59xx94g8awapkn2n2x4mslvmr7ql5367436u6608slsjyfyxarczq8pag6sex4288mu3ewyhrr73vccm3cqy8mz9wtp282568cej5qdhatlqqf5s8j2rkhdktshc36cy';
 
 // notification settings
 const NOTIFY_TYPE = '{:notify_type:}';

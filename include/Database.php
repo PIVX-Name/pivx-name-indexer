@@ -126,7 +126,12 @@ class Database
 
         if ($this->dbLink['xa_tx_status'] === self::XA_TX_STATUS_BLANK) {
             if ($this->tx_id === []) {
-                $this->tx_id = $tx_id === [] ? ['XA-' . microtime(true) . random_int(1, 100000), ''] : $tx_id;
+                if ($tx_id === []) {
+                    $this->tx_id = ['XA-' . microtime(true) . random_int(1, 100000), ''];
+                } else {
+                    $tx_id[1] = PROJECT_NAME . '-' . $tx_id[1];
+                    $this->tx_id = $tx_id;
+                }
             }
 
             if (!$this->xaTXQuery('XA START ' . $this->formatXATX())) {

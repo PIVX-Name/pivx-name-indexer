@@ -1,10 +1,26 @@
-/var/log/indexer/*.log {
+# Every service in the appliance. copytruncate throughout: these processes hold their log
+# files open and none of them reopen on SIGHUP the way a systemd-managed daemon would, so
+# renaming a file would leave the writer appending to an unlinked inode until restart.
+# nginx is deliberately absent: its package ships /etc/logrotate.d/nginx, and listing the
+# same files here made logrotate abort with "duplicate log entry" and skip nginx's config
+# entirely — so nginx was rotating only by accident, through this file. Its own config is
+# also better for it: it signals USR1 so nginx reopens its logs, where copytruncate leaves
+# a window in which writes are lost.
+#
+# MySQL and rr-proxy have no packaged config here, and neither reopens on a signal, so
+# copytruncate is the right choice for them.
+/var/log/indexer/*.log
+/var/log/rr-proxy/*.log
+/var/log/mysql/*.log
+{
     daily
-    rotate 3
+    rotate 7
+    size 32M
     copytruncate
     compress
     delaycompress
     missingok
     notifempty
     su root root
+    create 0640 www-data www-data
 }

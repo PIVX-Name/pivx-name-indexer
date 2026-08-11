@@ -2,223 +2,185 @@
 
 namespace Indexer;
 
+/**
+ * Thin client over the Sparse Merkle Tree owned by the rr-proxy daemon.
+ *
+ * Tree traversal, default (empty subtree) hashes and leaf hashing all live in
+ * the daemon, sharing one implementation with the on-chain prover. This class
+ * only issues commands and converts between raw bytes and the byte-array form
+ * used in JSON payloads.
+ *
+ * Each operation is a single round trip. A proof arrives together with the root
+ * it was built from, taken from one database snapshot, so the two can never
+ * describe different states of the tree.
+ */
 class SparseMerkleTree
 {
     private RustRocksDBProxy $db;
-    private array $defaultHashes = [];
 
-    /**
-     * @param RustRocksDBProxy $db
-     */
     public function __construct(RustRocksDBProxy $db)
     {
         $this->db = $db;
-
-        // We still calculate default hashes in RAM because they never change
-        // Stop at 128 levels.
-        $emptyLeaf = str_repeat("\0", 32);
-        $this->defaultHashes[0] = $emptyLeaf;
-        for ($i = 1; $i <= 128; $i++) {
-            $prev = $this->defaultHashes[$i - 1];
-            $this->defaultHashes[$i] = hash('sha256', $prev . $prev, true);
-        }
     }
 
     /**
-     * @param string $domain
-     * @return array
+     * Converts raw bytes to the array-of-integers form used in JSON payloads
+     * and consumed by the prover.
+     *
+     * @return int[]
      */
-    // Helper: Get the 128-bit path for a domain (Matches Rust exactly)
-    private function getPathBits(string $domain): array
+    private static function toBytes(string $binary): array
     {
-        $hash = hash('sha256', $domain, true);
-        $bits = [];
-        // Stop at byte 16 (128 bits) to cut the tree depth in half.
-        for ($i = 0; $i < 16; $i++) {
-            $byte = ord($hash[$i]);
-            for ($j = 7; $j >= 0; $j--) {
-                $bits[] = ($byte >> $j) & 1;
-            }
-        }
-        return $bits;
+        return array_values(unpack('C*', $binary));
     }
 
     /**
-     * @param string $domain
-     * @param string $leafHash
-     * @return void
-     * @throws RustRocksDBProxyException
-     */
-    public function update(string $domain, string $leafHash): void
-    {
-        $bits = $this->getPathBits($domain);
-        // Start traversal at height 128
-        $this->updateNode(128, '', $bits, $leafHash);
-    }
-
-    /**
-     * @param int $height
-     * @param string $path
-     * @param array $bits
-     * @param string $leafHash
-     * @return string
-     * @throws RustRocksDBProxyException
-     */
-    private function updateNode(int $height, string $path, array $bits, string $leafHash): string
-    {
-        if ($height === 0) {
-            $this->db->putNode($path, $leafHash); // NEW: Save directly to Rust
-            return $leafHash;
-        }
-
-        // Max index is now 128
-        $bit = $bits[128 - $height];
-        $leftPath = $path . '0';
-        $rightPath = $path . '1';
-
-        if ($bit === 0) {
-            $leftHash = $this->updateNode($height - 1, $leftPath, $bits, $leafHash);
-
-            // Try to fetch from Rust. If null, use the default empty hash.
-            $hexRight = $this->db->getNode($rightPath);
-            $rightHash = $hexRight ? hex2bin($hexRight) : $this->defaultHashes[$height - 1];
-        } else {
-            $hexLeft = $this->db->getNode($leftPath);
-            $leftHash = $hexLeft ? hex2bin($hexLeft) : $this->defaultHashes[$height - 1];
-
-            $rightHash = $this->updateNode($height - 1, $rightPath, $bits, $leafHash);
-        }
-
-        $newHash = hash('sha256', $leftHash . $rightHash, true);
-        $this->db->putNode($path, $newHash); // Save directly to Rust
-
-        return $newHash;
-    }
-
-    /**
-     * @param string $domain
-     * @return array
-     * @throws RustRocksDBProxyException
-     */
-    public function getProof(string $domain): array
-    {
-        $bits = $this->getPathBits($domain);
-        $path = '';
-        $pathsAtHeight = [];
-
-        // PATCHED: Start from 128
-        for ($h = 128; $h > 0; $h--) {
-            $pathsAtHeight[$h] = $path;
-            $bit = $bits[128 - $h];
-            $path .= ($bit === 0) ? '0' : '1';
-        }
-        $pathsAtHeight[0] = $path;
-
-        $proof = [];
-        // PATCHED: Loop 128 times
-        for ($h = 0; $h < 128; $h++) {
-            $currentPath = $pathsAtHeight[$h];
-            $bit = $bits[127 - $h]; // PATCHED: Max index for a 128-bit array is 127
-
-            $parentPath = substr($currentPath, 0, -1);
-            $siblingPath = $parentPath . (($bit === 0) ? '1' : '0');
-
-            // NEW: Fetch sibling directly from Rust
-            $hexSibling = $this->db->getNode($siblingPath);
-            $siblingHash = $hexSibling ? hex2bin($hexSibling) : $this->defaultHashes[$h];
-
-            $proof[] = array_values(unpack('C*', $siblingHash));
-        }
-
-        return $proof;
-    }
-
-    /**
-     * @return array
+     * Current tree root.
+     *
+     * @return int[] 32 bytes
      * @throws RustRocksDBProxyException
      */
     public function getRoot(): array
     {
-        // NEW: Fetch root directly from Rust
-        $hexRoot = $this->db->getNode('');
-        // PATCHED: Use default 128 if tree is totally empty
-        $rootBinary = $hexRoot ? hex2bin($hexRoot) : $this->defaultHashes[128];
-        return array_values(unpack('C*', $rootBinary));
+        return self::toBytes($this->db->smtRoot());
     }
 
-    // Helper methods
-    // Exactly mirrors Rust's `hash_leaf` function
-    public static function hashLeaf(
+    /**
+     * Current tree root as a hex string.
+     *
+     * @throws RustRocksDBProxyException
+     */
+    public function getRootHex(): string
+    {
+        return bin2hex($this->db->smtRoot());
+    }
+
+    /**
+     * Merkle proof for a domain, in the shape the prover expects as JSON.
+     *
+     * The tree is compact, so a proof is variable length: roughly log2(domains)
+     * siblings rather than a fixed 128. Callers must not assume a fixed count.
+     *
+     * @return array{depth:int, siblings:int[][], terminal:string|array}
+     * @throws RustRocksDBProxyException
+     */
+    public function getProof(string $domain): array
+    {
+        return self::proofToJson($this->db->smtProof($domain)['proof']);
+    }
+
+    /**
+     * Merkle proof together with the root it was built from.
+     *
+     * Prefer this over separate getProof()/getRoot() calls: those can observe
+     * different states if another process commits between them, producing a
+     * proof that will not verify against the returned root.
+     *
+     * @return array{root:int[], proof:array{depth:int, siblings:int[][], terminal:string|array}}
+     * @throws RustRocksDBProxyException
+     */
+    public function getProofWithRoot(string $domain): array
+    {
+        $result = $this->db->smtProof($domain);
+
+        return [
+            'root' => self::toBytes($result['root']),
+            'proof' => self::proofToJson($result['proof']),
+        ];
+    }
+
+    /**
+     * Converts a decoded proof's raw byte strings into the array-of-integers form
+     * the prover's JSON payload uses.
+     *
+     * The shape mirrors the prover's `Proof` struct exactly, including the terminal:
+     * `"Occupied"` or `"Vacant"` as a bare string, and `{"Blocked":{"record":{...}}}`
+     * when another domain holds the slot. Changing this shape breaks deserialisation
+     * inside the zkVM.
+     *
+     * @param array{depth:int, siblings:string[], terminal:string|array} $proof
+     * @return array{depth:int, siblings:int[][], terminal:string|array}
+     */
+    private static function proofToJson(array $proof): array
+    {
+        $terminal = $proof['terminal'];
+
+        if (is_array($terminal)) {
+            $record = $terminal['Blocked']['record'];
+            $terminal = [
+                'Blocked' => [
+                    'record' => [
+                        'domain' => $record['domain'],
+                        'pubkey' => self::toBytes($record['pubkey']),
+                        'target_address' => $record['target_address'],
+                        'price' => $record['price'],
+                        'nonce' => $record['nonce'],
+                    ],
+                ],
+            ];
+        }
+
+        return [
+            'depth' => $proof['depth'],
+            'siblings' => array_map(
+                static fn(string $sibling): array => self::toBytes($sibling),
+                $proof['siblings']
+            ),
+            'terminal' => $terminal,
+        ];
+    }
+
+    /**
+     * Writes the domain's record into the tree and returns the new root.
+     *
+     * The leaf hash is derived by the daemon from these fields, so the hashing
+     * format is defined in exactly one place.
+     *
+     * @param string $pubkeyBinary 32-byte raw binary public key
+     * @return int[] the new root, 32 bytes
+     * @throws RustRocksDBProxyException
+     */
+    public function update(
         string $domain,
         string $pubkeyBinary,
         string $targetAddress,
         int $price,
         int $nonce
-    ): string {
-        // 'P' packs an unsigned 64-bit integer in little-endian byte order.
-        // This is mathematically identical to Rust's u64::to_le_bytes()
-        $priceBytes = pack('P', $price);
-        $nonceBytes = pack('P', $nonce);
-
-        return hash('sha256', $domain . $pubkeyBinary . $targetAddress . $priceBytes . $nonceBytes, true);
+    ): array {
+        return self::toBytes(
+            $this->db->smtUpdate($domain, $pubkeyBinary, $targetAddress, $price, $nonce)
+        );
     }
 
     /**
-     * Checks if a domain leaf already exists and is registered in the SMT.
+     * Raw hex leaf hash for a domain, or null when it has never been registered
+     * (or was reset to the empty leaf).
      *
-     * @param string $domain
-     * @return bool
-     * @throws RustRocksDBProxyException
-     */
-    public function leafExists(string $domain): bool
-    {
-        $leafHash = $this->getLeaf($domain);
-        return $leafHash !== null;
-    }
-
-    /**
-     * Fetches the raw hex leaf hash for a domain directly from RocksDB.
-     * Returns null if it doesn't exist or is the default empty leaf.
-     *
-     * @param string $domain
-     * @return string|null
      * @throws RustRocksDBProxyException
      */
     public function getLeaf(string $domain): ?string
     {
-        // 1. Calculate the exact 128-bit database key (path) for this domain
-        $bits = $this->getPathBits($domain);
-        $path = implode('', $bits);
-
-        // 2. Query RocksDB directly using your proxy
-        $hexLeaf = $this->db->getNode($path);
-
-        // 3. If nothing is returned, the leaf has never been touched
-        if (!$hexLeaf) {
-            return null;
-        }
-
-        // 4. Check if it explicitly matches the "empty" Genesis leaf
-        // (in case a domain was deleted/reset)
-        $binaryLeaf = hex2bin($hexLeaf);
-        if ($binaryLeaf === $this->defaultHashes[0]) {
-            return null;
-        }
-
-        return $hexLeaf;
+        $leaf = $this->db->smtLeaf($domain);
+        return $leaf === null ? null : bin2hex($leaf);
     }
 
     /**
-     * Verifies that a domain currently exists in the exact state provided.
-     * Returns false if any single parameter (owner, address, price, nonce)
-     * differs from the database, or if the domain doesn't exist.
+     * Whether a domain currently has a leaf in the tree.
      *
-     * @param string $domain
+     * @throws RustRocksDBProxyException
+     */
+    public function leafExists(string $domain): bool
+    {
+        return $this->db->smtLeaf($domain) !== null;
+    }
+
+    /**
+     * Verifies that a domain exists in exactly the state described.
+     *
+     * Returns false if the domain is absent, or if any single field (owner,
+     * address, price, nonce) differs from what is stored.
+     *
      * @param string $pubkeyBinary 32-byte raw binary public key
-     * @param string $targetAddress
-     * @param int $price
-     * @param int $nonce
-     * @return bool
      * @throws RustRocksDBProxyException
      */
     public function verifyDomainState(
@@ -228,17 +190,6 @@ class SparseMerkleTree
         int $price,
         int $nonce
     ): bool {
-        // 1. Calculate the expected leaf hash for the state you are checking
-        $expectedBinaryHash = self::hashLeaf($domain, $pubkeyBinary, $targetAddress, $price, $nonce);
-
-        // Convert the binary hash to hex so we can compare it to the DB output
-        $expectedHexHash = bin2hex($expectedBinaryHash);
-
-        // 2. Fetch the actual current leaf hash from RocksDB
-        $currentHexHash = $this->getLeaf($domain);
-
-        // 3. If the domain doesn't exist, getLeaf() returns null, and this safely returns false.
-        // Otherwise, it returns true ONLY if every single byte matches perfectly.
-        return $expectedHexHash === $currentHexHash;
+        return $this->db->smtVerify($domain, $pubkeyBinary, $targetAddress, $price, $nonce);
     }
 }

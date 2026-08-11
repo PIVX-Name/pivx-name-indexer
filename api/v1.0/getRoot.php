@@ -17,6 +17,4 @@ if (isset($uri[2])) {
 $rocksDb = new RustRocksDBProxy(INDEXER_ROCKSDB_PROXY_SOCKET_PATH);
 $smt = new SparseMerkleTree($rocksDb);
 
-pack('C*', ...$smt->getRoot())
-    |> bin2hex(...)
-    |> (static fn($x) => apiAnswer('response', $x));
+apiAnswer('response', $smt->getRootHex());

@@ -1,4 +1,4 @@
-POST https://indexer.pivxname.loc/v1.0/history/alexxiy.secure
+POST https://indexer.pivxname.loc/v1.0/history/bob.pivx
 Content-Type: application/json
 
 {

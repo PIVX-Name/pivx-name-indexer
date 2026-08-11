@@ -1,0 +1,30 @@
+# rr-proxy configuration for the container appliance.
+
+[server]
+# Must match INDEXER_ROCKSDB_PROXY_SOCKET_PATH in config/release.inc.php.sample —
+# the PHP client connects by absolute path, and a mismatch surfaces only as
+# "Failed to connect to rr-proxy", which reads like the daemon is down.
+socket_path = "/run/rr-proxy/pivx-indexer.sock"
+socket_perms = "0660"
+
+[logging]
+log_file = "/var/log/rr-proxy/rr-proxy.log"
+level = "info"
+
+[database]
+db_path = "/opt/rr-proxy/db/indexer_rocksdb"
+# Off by design: a lost or unmounted volume must fail loudly rather than come up serving an
+# empty tree, which would look healthy while answering every lookup wrongly. The entrypoint
+# flips this to true for the first start only, when there is genuinely nothing to lose.
+create_if_missing = false
+
+[tuning]
+max_background_jobs = 4
+write_buffer_size_mb = 64
+max_open_files = 10000
+max_input_size = 16777216
+block_cache_size_mb = 128
+# fsync the WAL on commit. Required for the MySQL XA two-phase commit to stay consistent
+# with the tree across a power loss.
+sync_on_commit = true
+max_batch_entries = 1000000

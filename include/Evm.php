@@ -31,8 +31,26 @@ class Evm
     protected Eth $eth;
     protected Ethabi $ethAbi;
     protected array $events;
+    /**
+     * Block that every contract read is answered from, as a hex quantity, or null to let
+     * the node answer from `latest`.
+     *
+     * Pinned to one concrete height rather than passing the `finalized` tag on each call,
+     * for two reasons. Reading `latest` lets a checkpoint that a reorg later discards be
+     * persisted, and the reconcile path then treats that as a rollback: it deletes rows
+     * and force-stops the node demanding a rebuild, turning an ordinary one-block BSC
+     * reorg into an operator-intervention outage. And a run that resolved the tag per call
+     * would let the length probe and the fetches that follow it straddle different chain
+     * tips, so the walk could observe a length it can no longer read to.
+     */
+    protected ?string $readBlock = null;
+    /**
+     * What pinReadBlock() settled on, so it can report the same answer twice.
+     *
+     * @var array{block: int, mode: string}|null
+     */
+    protected ?array $pinnedAt = null;
 
-    protected array $eventNamesTypesCached = [];
 
     /**
      * @param array $networkInfo
@@ -158,6 +176,7 @@ class Evm
             'status code 503',
             'status code 504',
             'cloudflare',
+            'limit exceeded',
         ];
 
         foreach ($unavailabilityPatterns as $pattern) {
@@ -175,6 +194,40 @@ class Evm
             throw $error;
         }
         throw new RuntimeException($message);
+    }
+
+    /**
+     * Height of the most recent block the chain considers FINAL, or null when the
+     * endpoint does not support the tag.
+     *
+     * BSC finality is provable rather than probabilistic: under Parlia with fast
+     * finality a finalized block cannot be reverted without slashing a supermajority
+     * of validators. So this is a real guarantee, not a confidence heuristic - which
+     * is why anchoring waits on this rather than counting confirmations.
+     *
+     * Returns null rather than throwing when `finalized` is unsupported: the RPC list
+     * is third-party and rotates, so callers fall back to a confirmation depth instead
+     * of stalling the pipeline on one endpoint's capabilities.
+     *
+     * @throws Throwable
+     */
+    public function getFinalizedBlockNumber(): ?int
+    {
+        $result = null;
+        try {
+            $this->eth->getBlockByNumber('finalized', false, function ($err, $data) use (&$result) {
+                // Not handleRpcError(): an endpoint that does not know the tag is a
+                // capability gap, not a fault worth rotating the endpoint over.
+                if ($err !== null || $data === null || !isset($data->number)) {
+                    return;
+                }
+                $result = (int)hexdec(ltrim((string)$data->number, "\x00"));
+            });
+        } catch (Throwable) {
+            return null;
+        }
+
+        return $result;
     }
 
     /**
@@ -199,120 +252,225 @@ class Evm
     }
 
     /**
-     * @param string $eventName
-     * @param string|int $fromBlock
-     * @param string|int $toBlock
-     * @return array
+     * Reads one `view` function on the anchor contract, with throttling applied.
+     *
+     * All checkpoint discovery goes through here.
+     *
+     * @param array<int, mixed> $args
+     * @return array<int, mixed> raw decoded return values
      * @throws Throwable
      */
-    public function getEventLogs(
-        string $eventName,
-        string|int $fromBlock = 'latest',
-        string|int $toBlock = 'latest'
-    ): array {
-        //try to ensure block numbers are valid together
-        if ($fromBlock !== 'latest') {
-            if (!is_int($fromBlock) || $fromBlock < 1) {
-                throw new InvalidArgumentException('Please make sure fromBlock is a valid block number');
-            }
-            if ($toBlock !== 'latest' && (!is_int($toBlock) || $fromBlock > $toBlock)) {
-                throw new InvalidArgumentException('Please make sure fromBlock is equal or less than toBlock');
-            }
-        }
-
-        if ($toBlock !== 'latest') {
-            if (!is_int($toBlock) || $toBlock < 1) {
-                throw new InvalidArgumentException('Please make sure toBlock is a valid block number');
-            }
-            if ($fromBlock === 'latest') {
-                throw new InvalidArgumentException('Please make sure toBlock is equal or greater than fromBlock');
-            }
-        }
-
-        //ensure the event actually exists before trying to filter for it
-        if (!array_key_exists($eventName, $this->events)) {
-            throw new InvalidArgumentException("'$eventName' does not exist in the ABI for this contract");
-        }
-
-        //indexed and non-indexed event parameters must be treated separately
-        //indexed parameters are stored in the 'topics' array
-        //non-indexed parameters are stored in the 'data' value
-        if (!isset($this->eventNamesTypesCached[$eventName])) {
-            $parameterNames = [];
-            $parameterTypes = [];
-            $indexedNames = [];
-            $indexedTypes = [];
-
-            foreach ($this->events[$eventName]['inputs'] as $input) {
-                if ($input['indexed']) {
-                    $indexedNames[] = $input['name'];
-                    $indexedTypes[] = $input['type'];
-                } else {
-                    $parameterNames[] = $input['name'];
-                    $parameterTypes[] = $input['type'];
+    public function callContract(string $function, array $args = []): array
+    {
+        $out = null;
+        $handler = static function ($err, $result) use (&$out, $function) {
+            if ($err !== null) {
+                if ($err instanceof Throwable) {
+                    throw $err;
                 }
+                throw new RuntimeException('eth_call ' . $function . ': ' . $err);
             }
+            $out = $result;
+        };
 
-            $this->eventNamesTypesCached[$eventName] = [
-                'parameterNames' => $parameterNames,
-                'parameterTypes' => $parameterTypes,
-                'indexedNames' => $indexedNames,
-                'indexedTypes' => $indexedTypes,
-                'numIndexed' => count($indexedNames)
-            ];
-        }
+        // Contract::call() pops the callback first and slices off the function's declared
+        // inputs; a single remaining non-array argument is then taken as the block to read
+        // at. So appending it here needs no change in the library.
+        $tail = $this->readBlock === null ? [$handler] : [$this->readBlock, $handler];
 
-        $eventLogData = [];
-
-        //filter through log data to find any logs which match this event (topic) from
-        //this contract, between these specified blocks (defaulting to the latest block only)
         try {
-            $this->eth->getLogs(
-                [
-                    'fromBlock' => (is_int($fromBlock)) ? '0x' . dechex($fromBlock) : $fromBlock,
-                    'toBlock' => (is_int($toBlock)) ? '0x' . dechex($toBlock) : $toBlock,
-                    'topics' => [$this->ethAbi->encodeEventSignature($this->events[$eventName])],
-                    'address' => $this->contractAddress
-                ],
-                function ($error, $result) use (&$eventLogData, $eventName) {
-                    if ($error !== null) {
-                        $this->handleRpcError($error);
-                    }
-
-                    $cache = $this->eventNamesTypesCached[$eventName];
-
-                    foreach ($result as $object) {
-                        //decode the data from the log into the expected formats, with its corresponding named key
-                        $decodedData = array_combine(
-                            $cache['parameterNames'],
-                            $this->ethAbi->decodeParameters($cache['parameterTypes'], $object->data)
-                        );
-
-                        //decode the indexed parameter data
-                        for ($i = 0; $i < $cache['numIndexed']; $i++) {
-                            //topics[0] is the event signature, so we start from $i + 1 for the indexed parameter data
-                            $decodedData[$cache['indexedNames'][$i]] =
-                                $this->ethAbi->decodeParameters(
-                                    [$cache['indexedTypes'][$i]],
-                                    $object->topics[$i + 1]
-                                )[0];
-                        }
-
-                        //include block metadata for context, along with event data
-                        $eventLogData[] = [
-                            'transactionHash' => $object->transactionHash,
-                            'blockHash' => $object->blockHash,
-                            'blockNumber' => hexdec($object->blockNumber),
-                            'data' => $decodedData
-                        ];
-                    }
-                }
-            );
+            $this->contract->at($this->contractAddress)->call($function, ...[...$args, ...$tail]);
         } catch (Throwable $e) {
             $this->handleRpcError($e);
         }
 
-        return $eventLogData;
+        // Paced rather than parallel: the endpoint limit is per-second concurrency, not
+        // total volume.
+        if (EVM_THROTTLING > 0) {
+            usleep(EVM_THROTTLING);
+        }
+
+        return $out ?? [];
+    }
+
+    /**
+     * Pins every subsequent contract read in this run to the newest finalised block, and
+     * reports which rule produced it: 'finalized' when the endpoint serves the tag, 'depth'
+     * when it does not and a confirmation depth stood in.
+     *
+     * Those two are not equivalent — depth is probabilistic where the tag is a consensus
+     * guarantee — so the caller is expected to log the mode rather than let "final" quietly
+     * mean two different things. This mirrors what the registrar already does before it
+     * treats an anchor transaction as settled.
+     *
+     * Idempotent: the first call fixes the height for the lifetime of the instance.
+     *
+     * @return array{block: int, mode: string}
+     * @throws Throwable
+     */
+    public function pinReadBlock(): array
+    {
+        // Return what is actually pinned. Re-resolving would report a height the reads are
+        // not using, which is worse than not reporting at all.
+        if ($this->pinnedAt !== null) {
+            return $this->pinnedAt;
+        }
+
+        $mode = 'finalized';
+        $block = $this->getFinalizedBlockNumber();
+
+        if ($block === null) {
+            $mode = 'depth';
+            $block = $this->getBlockCount() - EVM_FINALITY_FALLBACK_CONFIRMATIONS;
+        }
+
+        // A chain younger than the fallback depth would otherwise ask for a negative
+        // height; genesis is the honest floor and simply yields an empty rootChain.
+        $block = max($block, 0);
+
+        $this->readBlock = '0x' . dechex($block);
+
+        return $this->pinnedAt = ['block' => $block, 'mode' => $mode];
+    }
+
+    /**
+     * Normalises a bytes32 the RPC returned into the 64-char lowercase hex this codebase
+     * stores.
+     *
+     * web3.php is inconsistent here and it matters: a non-zero root arrives as the
+     * 66-character "0x…" string, but the all-zero genesis root arrives as the single
+     * character "0". Storing that verbatim would make the genesis checkpoint compare
+     * unequal to the empty-tree root the SMT reports, and the very first verification
+     * would fail.
+     */
+    private static function normaliseRoot(mixed $value): string
+    {
+        $hex = strtolower((string)$value);
+        if (str_starts_with($hex, '0x')) {
+            $hex = substr($hex, 2);
+        }
+        return str_pad($hex, 64, '0', STR_PAD_LEFT);
+    }
+
+    /**
+     * The root the contract currently attests to.
+     *
+     * This is what "synced" is measured against — not the newest local checkpoint row,
+     * which goes stale in step with the computed root and would agree with it even when
+     * the node is far behind.
+     *
+     * @throws Throwable
+     */
+    public function getCurrentRoot(): string
+    {
+        return self::normaliseRoot($this->callContract('currentRoot')[0] ?? '');
+    }
+
+    /**
+     * Whether `rootChain` has an entry at this index. Out of range reverts.
+     *
+     * @throws Throwable
+     */
+    private function rootChainIndexExists(int $index): bool
+    {
+        try {
+            $this->callContract('rootChain', [$index]);
+            return true;
+        } catch (Throwable $e) {
+            // ONLY an actual revert means "past the end". Anything else — a dead
+            // endpoint, a rate limit, a timeout — must propagate.
+            //
+            // Swallowing transport errors here reports an unreachable chain as length 0,
+            // which the caller cannot distinguish from "rolled back past genesis". That
+            // is not a theoretical concern: it deleted a node's entire checkpoint table
+            // during an endpoint outage and left it unable to start.
+            if (self::isRevert($e)) {
+                return false;
+            }
+            throw $e;
+        }
+    }
+
+    /**
+     * Whether an RPC error is the contract reverting, as opposed to the endpoint failing.
+     */
+    private static function isRevert(Throwable $e): bool
+    {
+        return stripos($e->getMessage(), 'execution reverted') !== false
+            || stripos($e->getMessage(), 'out of bounds') !== false;
+    }
+
+    /**
+     * Number of roots the contract has ever accepted (`rootChain.length`).
+     *
+     * Solidity's auto-generated array getter exposes no length, so this doubles up to find
+     * an out-of-range index and then binary-searches the boundary: ~2*log2(n) calls, once
+     * per sync run.
+     *
+     * @throws Throwable
+     */
+    public function getRootChainLength(): int
+    {
+        if (!$this->rootChainIndexExists(0)) {
+            return 0;
+        }
+
+        $lo = 0;
+        $hi = 1;
+        while ($this->rootChainIndexExists($hi)) {
+            $lo = $hi;
+            $hi <<= 1;
+        }
+        while ($lo + 1 < $hi) {
+            $mid = intdiv($lo + $hi, 2);
+            if ($this->rootChainIndexExists($mid)) {
+                $lo = $mid;
+            } else {
+                $hi = $mid;
+            }
+        }
+
+        return $lo + 1;
+    }
+
+    /**
+     * The checkpoint at `rootChain[$index]`: its root and the PIVX height it covers.
+     *
+     * Returns null when the index is past the end, which is how the caller notices the
+     * chain shrank under a rollback.
+     *
+     * @return array{root: string, block_id: int}|null
+     * @throws Throwable
+     */
+    public function getCheckpointAt(int $index): ?array
+    {
+        try {
+            $raw = $this->callContract('rootChain', [$index])[0] ?? null;
+        } catch (Throwable $e) {
+            // Same rule as rootChainIndexExists(): null means "not on the chain", so only
+            // a revert may produce it. An endpoint failure has to surface as an exception.
+            if (self::isRevert($e)) {
+                return null;
+            }
+            throw $e;
+        }
+        if ($raw === null) {
+            return null;
+        }
+
+        $info = $this->callContract('rootHistory', [$raw]);
+
+        // A valid entry always carries a height. isValid false would mean a rollback
+        // repudiated it, in which case it is no longer part of the chain and must not be
+        // recorded as a checkpoint.
+        if (($info['isValid'] ?? false) !== true) {
+            return null;
+        }
+
+        return [
+            'root' => self::normaliseRoot($raw),
+            'block_id' => (int)$info['blockHeight']->toString(),
+        ];
     }
 
     /**

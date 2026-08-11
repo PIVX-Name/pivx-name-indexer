@@ -1,0 +1,19 @@
+[Unit]
+Description=PIVX Name Indexer Stalled Lock Watchdog Timer
+
+[Timer]
+Unit=pivx-name-indexer-watchdog.service
+
+# Later than the sync timer's 2min: there is nothing to watch until sync has had a chance
+# to run at least once.
+OnBootSec=5min
+
+# The lock is reported as stalled at SYNC_LOCK_STALE_SEC (600s), so checking every
+# 5 minutes detects it well within one threshold. Note the alert repeats on every check
+# for as long as the lock stays held.
+OnUnitActiveSec=5min
+
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

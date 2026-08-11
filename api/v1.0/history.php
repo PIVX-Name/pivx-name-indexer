@@ -48,7 +48,7 @@ $qr = $db->doSelect(
     'domains_history',
     '*',
     $where,
-    'ORDER BY `domain_block_id` ' . $request['order'] . ' LIMIT ' . $request['count']
+    'ORDER BY `domain_block_id` ' . $request['order'] . ', `nonce` ' . $request['order'] . ' LIMIT ' . $request['count']
 );
 
 if ($qr === false) {

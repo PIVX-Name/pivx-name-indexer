@@ -1,12 +1,9 @@
 name: Build and Push Docker Image
 
+# Releases only. A push to main used to build too, which meant `latest` tracked whatever
+# was last merged rather than what was last released - so anyone pulling `latest` could get
+# an unreleased commit. Publishing a release is now the single event that produces an image.
 on:
-  push:
-    branches:
-      - main
-      - master
-    tags:
-      - 'v*'
   release:
     types: [published]
 
@@ -37,12 +34,18 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest=false disables the built-in "auto" rule, which decides from the tag STRING
+          # whether something is a pre-release. The explicit rule below uses the release's own
+          # pre-release flag instead - the checkbox in the GitHub release UI - so a release
+          # marked pre-release stays off `latest` even when its tag looks like a normal
+          # version, and vice versa.
+          flavor: |
+            latest=false
           tags: |
-            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5

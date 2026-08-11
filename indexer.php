@@ -12,18 +12,32 @@ use Denpa\Bitcoin\Exceptions\BadRemoteCallException;
 use Denpa\Bitcoin\Responses\BitcoindResponse;
 use Telegram\Bot\Api;
 
-require './vendor/autoload.php';
+require __DIR__ . '/vendor/autoload.php';
 require __DIR__ . '/config.php';
 require __DIR__ . '/include/functions.php';
 
-$db = new Database();
-Protocol::init($db);
-$rocksDb = new RustRocksDBProxy(INDEXER_ROCKSDB_PROXY_SOCKET_PATH);
-$smt = new SparseMerkleTree($rocksDb);
-
 $command = $argv[1] ?? '';
+$watchdogLockFile = __DIR__ . '/resources/sync.lock';
 
 try {
+    if ($command === 'watchdog') {
+        // Read-only: report a stalled lock without ever competing for it. See watchdog.php.
+        // Dispatched before the Database and rr-proxy objects are built so the watchdog
+        // stays independent of them. Both constructors are lazy today, so this changes
+        // nothing at runtime; it keeps the watchdog working if either ever starts
+        // connecting eagerly, which is exactly when it would be needed most.
+        $watchdogInspectOnly = true;
+        include __DIR__ . '/watchdog.php';
+        exit;
+    }
+
+    // Moved inside the try so that any future eager connection failure is logged and
+    // notified like other errors instead of dying uncaught before the handler exists.
+    $db = new Database();
+    Protocol::init($db);
+    $rocksDb = new RustRocksDBProxy(INDEXER_ROCKSDB_PROXY_SOCKET_PATH);
+    $smt = new SparseMerkleTree($rocksDb);
+
     if ($command === 'clean') {
         if (($argv[2] ?? '') !== 'confirm') {
             echo 'Warning!!!' . PHP_EOL .
@@ -39,18 +53,19 @@ try {
         if ($db->doInsert(
             'checkpoints',
             [
-                'block_id' => PIVX_GENESIS_BLOCK,
+                // idx 0 is the contract's rootChain[0] — the genesis root it was deployed
+                // with. Discovery resumes from the highest idx, so this row is the anchor
+                // the whole ascending walk hangs from.
+                'idx' => 0,
+                'block_id' => COIN_GENESIS_BLOCK,
                 'smt_root' => SMT_GENESIS_ROOT,
-                'evm_block_id' => EVM_GENESIS_BLOCK,
-                'evm_tx_hash' => EVM_GENESIS_TX_HASH
             ]
         ) === false) {
             throw new RuntimeException('Can\'t insert Genesis Root to checkpoints', INT_EXC_DB);
         }
 
         setParams([
-            PARAM_LAST_PROCESSED_EVM_BLOCK => EVM_GENESIS_BLOCK,
-            PARAM_LAST_PROCESSED_PIVX_BLOCK => PIVX_GENESIS_BLOCK,
+            PARAM_LAST_PROCESSED_COIN_BLOCK => COIN_GENESIS_BLOCK,
         ], $db);
 
         if ($rocksDb->clear() === false) {
@@ -61,23 +76,17 @@ try {
         exit;
     }
     if ($command !== 'sync') {
-        echo '--== PIVX Domain name Indexer ==--' . PHP_EOL .
+        echo '--== ' . PROJECT_NAME . ' Domain name Indexer ==--' . PHP_EOL .
             'Supported commands:' . PHP_EOL .
             'sync - start the indexer sync iteration (the way it\'s started from Systemd timer service)' . PHP_EOL .
+            'watchdog - report a stalled sync lock (the way it\'s started from Systemd watchdog timer)' . PHP_EOL .
             'clean - perform the database clean for fresh initialization from on-chain data' . PHP_EOL;
         exit;
     }
 
     // Lock the execution more than one script at one moment
-    if (LockFileUtils::setLock(__DIR__ . '/resources/sync.lock') === false) {
-        if ($_SERVER['REQUEST_TIME'] - filemtime(__DIR__ . '/resources/sync.lock') > 600) {
-            throw new RuntimeException(
-                'Can\'t set the synchronization lock. Is Indexer already executing?',
-                INT_EXC_FATAL
-            );
-        }
-        exit;
-    }
+    $watchdogInspectOnly = false;
+    include __DIR__ . '/watchdog.php';
 
     // check if we have at least one RPC_URL added to work with
     if (($qr = $db->doSelect(
@@ -96,11 +105,13 @@ try {
 
     $evm = new Evm(EVM_NETWORK, $db);
 
+    // The newest checkpoint we hold locally. `idx` is the position in the contract's
+    // rootChain array, which is what makes discovery resumable.
     if (($qr = $db->doSelect(
         'checkpoints',
-        ['block_id', 'smt_root', 'evm_block_id'],
+        ['idx', 'block_id', 'smt_root'],
         [],
-        'ORDER BY `evm_block_id` DESC LIMIT 1'
+        'ORDER BY `idx` DESC LIMIT 1'
     )) === false) {
         throw new RuntimeException('Can\'t query checkpoints', INT_EXC_DB);
     }
@@ -116,7 +127,7 @@ try {
     // It can happen when commit to RocksDB or to MySQL on the last sync has failed.
     checkUncommitedXATX('indexer', $db, $smt, 'indexer.debug');
 
-    $requestedParams = [PARAM_LAST_PROCESSED_EVM_BLOCK, PARAM_LAST_PROCESSED_PIVX_BLOCK];
+    $requestedParams = [PARAM_LAST_PROCESSED_COIN_BLOCK];
     $params = getParams($requestedParams, $db);
     if (count($params) !== count($requestedParams)) {
         throw new RuntimeException(
@@ -125,114 +136,177 @@ try {
         );
     }
 
-    $insData = [];
-    $evmFromBlock = max(
-        $params[PARAM_LAST_PROCESSED_EVM_BLOCK],
-        $checkpoint['evm_block_id'],
-        EVM_GENESIS_BLOCK - 1 // -1 is for sync logic to start from last_block + 1
-    );
-    $evmFromBlock++;
+    // --- CHECKPOINT DISCOVERY ------------------------------------------------------
+    //
+    // Checkpoints are read ascending from the anchor contract's rootChain array. The idx
+    // column is the resume cursor, so an interrupted walk continues where it stopped.
+    //
+    // Best-effort by design: an RPC failure here must not prevent the blockchain sync
+    // below from processing the checkpoints already stored. Discovery fills the work
+    // queue; the sync consumes it. A short queue means less work this run, never none.
+    try {
+        // Pin every read below to one finalised height before the walk starts.
+        //
+        // Reading the chain tip would let a checkpoint that a reorg then discards be
+        // written to a table the reconcile path treats as authoritative: the next run sees
+        // the stored root disagree with the chain, deletes rows and force-stops demanding a
+        // rebuild. On BSC a one-block reorg is ordinary, so that turns routine chain
+        // behaviour into an outage. Pinning also keeps the length probe and the fetches
+        // that follow it on the same view, which reading the tip per call would not.
+        $pinned = $evm->pinReadBlock();
+        logEvent(
+            'Reading checkpoints at EVM block ' . $pinned['block'] . ' (' . $pinned['mode'] . ')',
+            'EVM Checkpoints',
+            'indexer.debug'
+        );
 
-    // syncing checkpoints from EVM
-    if (($evmCurrBlock = $evm->getBlockCount()) > $evmFromBlock) {
-        while ($evmCurrBlock >= $evmFromBlock) {
-            $evmToBlock = min($evmFromBlock + EVM_SYNC_BLOCK_STEP, $evmCurrBlock);
-            $logData = $evm->getEventLogs('RootUpdated', $evmFromBlock, $evmToBlock);
-            $logDataLast = array_key_last($logData);
-            if ($logData !== []) {
-                logEvent('There is some new data to process...', 'EVM checkpoints sync', 'indexer.debug');
-            }
-            foreach ($logData as $entryNumber => $oneLogEntry) {
-                $oneInsData = [
-                    'block_id' => $oneLogEntry['data']['endBlockHeight']->toString(),
-                    'smt_root' => substr($oneLogEntry['data']['newRoot'], 2),
-                    'evm_block_id' => $oneLogEntry['blockNumber'],
-                    'evm_tx_hash' => $oneLogEntry['transactionHash'],
-                ];
-                $insData[] = $oneInsData;
+        $chainLength = $evm->getRootChainLength();
+        $localNext = $checkpoint['idx'] + 1;
 
-                $checkpoint['evm_block_id'] = $oneInsData['evm_block_id'];
-                $checkpoint['block_id'] = $oneInsData['block_id'];
-                $checkpoint['smt_root'] = $oneInsData['smt_root'];
-
-                // debug logging
-                if (DEBUG) {
-                    $debugLogData = array_map(
-                        static fn($k, $v) => "$k: $v",
-                        array_keys($checkpoint),
-                        $checkpoint
-                    );
-                    logEvent(
-                        implode(', ', $debugLogData),
-                        'Received new EVM Checkpoint',
-                        'indexer.debug'
-                    );
-                }
-
-                if ($entryNumber === $logDataLast || count($insData) === 200) {
-                    if ($db->doBulkInsert(
-                        'checkpoints',
-                        $insData,
-                    ) === false) {
-                        throw new RuntimeException('Bulk insert to checkpoints', INT_EXC_DB);
-                    }
-                    logEvent(
-                        'Received checkpoints have been commited to the DB',
-                        'EVM Checkpoints',
-                        'indexer.debug'
-                    );
-                    $insData = [];
-                }
-            }
-            setParams([PARAM_LAST_PROCESSED_EVM_BLOCK => $evmToBlock], $db);
-            $evmFromBlock = $evmToBlock + 1;
+        // A rollback rewrites history below our high-water mark: the chain gets shorter,
+        // or an index we already hold now carries a different root.
+        $anchorOk = $chainLength >= $localNext;
+        if ($anchorOk) {
+            $anchor = $evm->getCheckpointAt($checkpoint['idx']);
+            $anchorOk = $anchor !== null && $anchor['root'] === $checkpoint['smt_root'];
         }
+
+        if (!$anchorOk) {
+            logEvent(
+                'Anchor mismatch at idx ' . $checkpoint['idx'] . ' — the contract rolled back; reconciling',
+                'EVM Checkpoints',
+                'indexer.debug'
+            );
+
+            $keep = -1;
+            for ($i = min($checkpoint['idx'], max($chainLength - 1, 0)); $i >= 0; $i--) {
+                $onChain = $evm->getCheckpointAt($i);
+                if ($onChain === null) {
+                    continue;
+                }
+                if (($qr = $db->doSelect('checkpoints', ['smt_root'], ['idx' => $i])) === false) {
+                    throw new RuntimeException('Can\'t query checkpoint for reconcile', INT_EXC_DB);
+                }
+                $localRoot = $qr->num_rows === 1 ? $qr->fetch_assoc()['smt_root'] : null;
+                if ($localRoot !== null && $localRoot === $onChain['root']) {
+                    $keep = $i;
+                    break;
+                }
+            }
+
+            // Genesis is immutable: the contract was deployed with it and no rollback can
+            // pop index 0. So "no index agrees, not even 0" cannot describe a real chain —
+            // it means the reads themselves were unreliable. Deleting on that reading is
+            // how an endpoint outage once wiped a node's entire checkpoint table.
+            if ($keep < 0) {
+                throw new RuntimeException(
+                    'Reconcile found no agreeing checkpoint, not even genesis — refusing to '
+                    . 'discard anything. The chain reads are unreliable; retrying next run.'
+                );
+            }
+
+            // Everything above the agreement point describes a state the contract no
+            // longer attests to, so it must not stay in a table that resolve() cites.
+            if ($db->doDelete('checkpoints', ['idx' => ['sign' => '>', 'value' => $keep]]) === false) {
+                throw new RuntimeException('Failed to discard rolled-back checkpoints', INT_EXC_DB);
+            }
+            throw new RuntimeException(
+                'Rolled back to checkpoint idx ' . $keep . '. Local domain state is now ahead of the '
+                . 'anchored chain and must be rebuilt: run "indexer clean confirm". :FORCE-STOP:',
+                INT_EXC_FATAL
+            );
+        }
+
+        // Fetch forward, persisting each chunk so an interruption keeps what it got.
+        $insData = [];
+        for ($idx = $localNext; $idx < $chainLength; $idx++) {
+            $cp = $evm->getCheckpointAt($idx);
+            if ($cp === null) {
+                break;
+            }
+
+            $insData[] = [
+                'idx' => $idx,
+                'block_id' => $cp['block_id'],
+                'smt_root' => $cp['root'],
+            ];
+            $checkpoint['idx'] = $idx;
+            $checkpoint['block_id'] = $cp['block_id'];
+            $checkpoint['smt_root'] = $cp['root'];
+
+            if (count($insData) >= EVM_BATCH_SIZE || $idx === $chainLength - 1) {
+                if ($db->doBulkInsert('checkpoints', $insData) === false) {
+                    throw new RuntimeException('Bulk insert to checkpoints', INT_EXC_DB);
+                }
+                logEvent(
+                    count($insData) . ' checkpoint(s) committed, through idx ' . $idx,
+                    'EVM Checkpoints',
+                    'indexer.debug'
+                );
+                $insData = [];
+            }
+        }
+    } catch (Throwable $e) {
+        // A rollback or a database failure is a real fault and must surface.
+        if (in_array($e->getCode(), [INT_EXC_FATAL, INT_EXC_DB], true)) {
+            throw $e;
+        }
+
+        // The ONLY place this file rotates a failing endpoint. Every call that can raise
+        // EvmRpcException is inside this try, so the top-level handler can never see one —
+        // catching it here without marking the endpoint would pin the indexer to a dead
+        // RPC run after run, discovery permanently stalled behind a single log line.
+        // Anything added later that calls Evm outside this block needs its own handling.
+        if ($e instanceof EvmRpcException) {
+            $evm->setRpcUrl(true);
+        }
+
+        logEvent(
+            'Checkpoint discovery stopped early: ' . $e->getMessage()
+            . '. Continuing with checkpoints up to idx ' . $checkpoint['idx'],
+            'EVM Checkpoints',
+            'indexer.debug'
+        );
     }
 
     $rpc = new RpcClient(RPC_CONFIG);
 
-    // check mnsync to prevent false data
-    /** @var BitcoindResponse $response */
-    $response = $rpc->request('mnsync', 'status');
-    $mnSync = $response->get();
-    if (!isset($mnSync['RequestedMasternodeAssets']) || $mnSync['RequestedMasternodeAssets'] !== 999) {
-        throw new RuntimeException('PIVX Node is not synced. Skip Indexer synchronization iteration...');
-    }
-    // end check mnsync
+    // check the node is synced, the Registrar wallet exists (viewing key is imported)
+    assertNodeIsGood($rpc);
 
-    // syncing PIVX blockchain to the latest checkpoint, validating commands, update domains DB and SMT root
-    if ($checkpoint['block_id'] > $params[PARAM_LAST_PROCESSED_PIVX_BLOCK]) {
+    // syncing blockchain to the latest checkpoint, validating commands, update domains DB and SMT root
+    if ($checkpoint['block_id'] > $params[PARAM_LAST_PROCESSED_COIN_BLOCK]) {
         logEvent(
             'There is new checkpoint block to sync to: ' . $checkpoint['block_id'],
-            'PIVX blockchain sync',
+            'Blockchain sync',
             'indexer.debug'
         );
 
-        $pivxSynced = false;
-        $pivxLastCheckpointBlockId = $params[PARAM_LAST_PROCESSED_PIVX_BLOCK];
-        while ($pivxSynced === false) {
+        $bcSynced = false;
+        $bcLastCheckpointBlockId = $params[PARAM_LAST_PROCESSED_COIN_BLOCK];
+        while ($bcSynced === false) {
             if (($qr = $db->doSelect(
                 'checkpoints',
                 ['block_id', 'smt_root'],
-                ['block_id' => ['sign' => '>', 'value' => $pivxLastCheckpointBlockId]],
+                ['block_id' => ['sign' => '>', 'value' => $bcLastCheckpointBlockId]],
                 'ORDER BY `block_id` ASC LIMIT 1'
             )) === false) {
                 throw new RuntimeException('Can\'t query next checkpoint for sync', INT_EXC_DB);
             }
             if ($qr->num_rows === 0) {
-                $pivxSynced = true;
+                $bcSynced = true;
                 logEvent(
                     'Synchronization is ended',
-                    'PIVX blockchain sync',
+                    'Blockchain sync',
                     'indexer.debug'
                 );
                 continue;
             }
-            $smtOldRoot = bin2hex(pack('C*', ...$smt->getRoot()));
+            $smtOldRoot = $smt->getRootHex();
             $lastCheckpoint = $qr->fetch_assoc();
 
             $newData = [];
-            for ($block = ++$pivxLastCheckpointBlockId; $block <= $lastCheckpoint['block_id']; $block++) {
+            for ($block = ++$bcLastCheckpointBlockId; $block <= $lastCheckpoint['block_id']; $block++) {
                 /** @var BitcoindResponse $response */
                 $response = $rpc->request('getblockhash', $block);
                 $blockHash = $response->get();
@@ -284,13 +358,14 @@ try {
                             continue;
                         }
 
-                        // Temporary protocol update for testnet addr change. TODO remove in prod
-                        Protocol::$block = $block;
-
                         foreach ($saplingTxInfo['outputs'] as $oneTxOutput) {
                             if ($oneTxOutput['address'] === INCOME_WALLET && isset($oneTxOutput['memoStr']) &&
-                                ($txValue = (string)$oneTxOutput['value']) &&
-                                ($commandData = Protocol::parseCommand($oneTxOutput['memoStr'], $txValue)) !== []) {
+                                ($txValue = Protocol::convertAmount((string)$oneTxOutput['value'])) &&
+                                ($commandData = Protocol::parseCommand(
+                                    $oneTxOutput['memoStr'],
+                                    $txValue,
+                                    $blockData['time']
+                                )) !== []) {
                                 // ignore TX with wrong coin amount
                                 if (Protocol::paymentAmountValid($commandData, $txValue) === false) {
                                     Protocol::clearDomainState();
@@ -303,7 +378,7 @@ try {
                                 $commandData['block_id'] = $block;
                                 $newData[] = $commandData;
 
-                                // there can't be more than one output to the same address in one tx
+                                // there can't be more than one command in the same tx
                                 break;
                             }
                         }
@@ -324,8 +399,19 @@ try {
             $rocksDb->beginTransaction();
 
             foreach ($newData as $oneNewData) {
-                // --- SMT SEQUENCE STEP A: Take the "Before" Picture ---
-                $merkleProof = $smt->getProof($oneNewData['domain_name']);
+                // debug logging
+                if (DEBUG) {
+                    $debugLogData = array_map(
+                        static fn($k, $v) => "$k: $v",
+                        array_keys($oneNewData),
+                        $oneNewData
+                    );
+                    logEvent(
+                        implode(', ', $debugLogData),
+                        'Received valid domain operation command',
+                        'indexer.debug'
+                    );
+                }
 
                 if ($oneNewData['op'] === Protocol::OP_REG) {
                     if (($qr = $db->doInsert(
@@ -334,6 +420,7 @@ try {
                             'domain_name' => $oneNewData['domain_name'],
                             'created_block_id' => $oneNewData['block_id'],
                             'updated_block_id' => $oneNewData['block_id'],
+                            'nonce' => $oneNewData['nonce'],
                         ],
                         true
                     )) === false) {
@@ -349,7 +436,10 @@ try {
                 } else {
                     if (($qr = $db->doUpdate(
                         'domains',
-                        ['updated_block_id' => $oneNewData['block_id']],
+                        [
+                            'updated_block_id' => $oneNewData['block_id'],
+                            'nonce' => $oneNewData['nonce'],
+                        ],
                         ['domain_name' => $oneNewData['domain_name']],
                     )) === false) {
                         throw new RuntimeException('Updating domain', INT_EXC_DB);
@@ -369,6 +459,7 @@ try {
                                 'domain_name' => $oneNewData['domain_name'],
                                 'price' => $oneNewData['price'],
                                 'block_id' => $oneNewData['block_id'],
+                                'nonce' => $oneNewData['nonce'],
                             ],
                             true
                         )) === false) {
@@ -426,34 +517,40 @@ try {
                 }
 
                 // --- SMT SEQUENCE STEP B: Move Time Forward ---
-                // Calculate the new hash and update the SMT tree so the next transaction
-                // gets the mathematically correct state.
-                $newLeafHash = $smt::hashLeaf(
+                // The daemon derives the leaf hash from these fields and rehashes the
+                // spine, so the next transaction gets the mathematically correct state.
+                $smt->update(
                     $oneNewData['domain_name'],
                     hex2bin($oneNewData['pubkey']),
                     $oneNewData['target_address'],
                     $oneNewData['price'],
                     $oneNewData['nonce'],
                 );
-                $smt->update($oneNewData['domain_name'], $newLeafHash);
 
                 // debug logging
-                if (DEBUG) {
-                    $debugLogData = array_map(
-                        static fn($k, $v) => "$k: $v",
-                        array_keys($oneNewData),
-                        $oneNewData
-                    );
-                    logEvent(
-                        implode(', ', $debugLogData),
-                        'Received valid domain operation command',
-                        'indexer.debug'
-                    );
-                }
+                logEvent(
+                    'Successfully processed!',
+                    'Received valid domain operation command',
+                    'indexer.debug'
+                );
             }
 
             // update the latest processed block to the latest processed checkpoint
-            setParams([PARAM_LAST_PROCESSED_PIVX_BLOCK => $lastCheckpoint['block_id']], $db);
+            setParams([PARAM_LAST_PROCESSED_COIN_BLOCK => $lastCheckpoint['block_id']], $db);
+
+            // Verify the SMT root BEFORE anything is committed.
+            //
+            // rr-proxy serves reads through the open batch overlay (read-your-own-writes),
+            // so this sees the pending tree. Checking after the commits would detect a
+            // divergence only once the wrong state was already durable and the
+            // last-processed marker had advanced past it — leaving the node to resume on
+            // top of state it had itself proven wrong.
+            if (($lastSMTRoot = $smt->getRootHex()) !== $lastCheckpoint['smt_root']) {
+                throw new RuntimeException(
+                    'SMT root verification failed. Expected: ' . $lastCheckpoint['smt_root'] . ', got: ' . $lastSMTRoot,
+                    INT_EXC_FATAL
+                );
+            }
 
             if ($db->xaTXFinalize(skipCommit: true) === false) {
                 throw new RuntimeException('Finalizing DB transaction', INT_EXC_DB);
@@ -467,19 +564,9 @@ try {
                 throw new RuntimeException('Commiting DB transaction', INT_EXC_DB);
             }
 
-            // check SMT root is valid at the end of the checkpoint
-            if (($lastSMTRoot = bin2hex(pack('C*', ...$smt->getRoot()))) !== $lastCheckpoint['smt_root']) {
-                throw new RuntimeException(
-                    'SMT root verification failed. Expected: ' . $lastCheckpoint['smt_root'] . ', got: ' . $lastSMTRoot,
-                    INT_EXC_FATAL
-                );
-            }
             logEvent('New SMT root validated: ' . $lastSMTRoot, 'SMT Root', 'indexer.debug');
 
-            $pivxLastCheckpointBlockId = $lastCheckpoint['block_id'];
-
-            // Free up memory after committing the checkpoint
-            $rocksDb->clearCache();
+            $bcLastCheckpointBlockId = $lastCheckpoint['block_id'];
         }
     }
 } catch (Throwable $e) {
@@ -492,9 +579,6 @@ try {
         },
         'indexer.error'
     );
-    if ($e instanceof EvmRpcException && isset($evm)) {
-        $evm->setRpcUrl(true);
-    }
 
     // send a notification to the Admin
     if ($e->getCode() === INT_EXC_FATAL &&
@@ -503,7 +587,7 @@ try {
             $telegram = new Api(NOTIFY_TG_BOT_KEY);
             $telegram->sendMessage([
                 'chat_id' => NOTIFY_TG_USER_ID,
-                'text' => 'PIVX Name Indexer error: ' . $e->getMessage()
+                'text' => PROJECT_NAME . ' Name Indexer error: ' . $e->getMessage()
             ]);
         } catch (Throwable $e) {
             logEvent(
@@ -515,4 +599,8 @@ try {
     }
 }
 
-LockFileUtils::releaseLock(__DIR__ . '/resources/sync.lock');
+// Only ever release a lock this run actually owns. The watchdog command reaches this line
+// too when it throws on a stalled lock, and it must not unlink a lock file it never took.
+if (LockFileUtils::isOwnLock($watchdogLockFile)) {
+    LockFileUtils::releaseLock($watchdogLockFile);
+}

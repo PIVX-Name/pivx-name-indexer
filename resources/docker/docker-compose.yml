@@ -1,19 +1,33 @@
 services:
   indexer:
-    image: ghcr.io/pivx-ninja/pivx-name-indexer:latest
+    image: ghcr.io/pivx-name/pivx-name-indexer:latest
     container_name: pivx-name-indexer
     restart: unless-stopped
     ports:
       - "8080:80"
     environment:
       - DB_USER=namedbuser
+      # Leave empty and one is generated on first start and kept with the data volume.
       - DB_PASSWORD=${DB_PASSWORD:-}
       - DB_NAME=pivx-name
+      # PIVX Core wallet JSON-RPC — the source of the command stream. Required; the
+      # container refuses to start without all four.
       - RPC_HOST=${RPC_HOST:-}
-      - RPC_PORT=${RPC_PORT:-}
+      - RPC_PORT=${RPC_PORT:-51473}
       - RPC_USER=${RPC_USER:-}
       - RPC_PASS=${RPC_PASS:-}
-      - EVM_RPC_URL=${EVM_RPC_URL:-https://sepolia-rollup.arbitrum.io/rpc}
+      # Chain the anchor contract is deployed on. MUST match EVM_NETWORK.chain_id in the
+      # config — rpc_list is queried by chain id, so endpoints filed under the wrong one
+      # are invisible and no checkpoint ever syncs, with no error to show for it.
+      - EVM_CHAIN_ID=${EVM_CHAIN_ID:-56}
+      # Seeded into rpc_list on first start. Several, so one endpoint being down or
+      # rate-limiting does not stall the sync.
+      - EVM_RPC_URL=${EVM_RPC_URL:-https://bsc-dataseed.bnbchain.org,https://bsc-dataseed.defibit.io,https://bsc-dataseed.ninicoin.io,https://bsc-dataseed-public.bnbchain.org}
+      # Microseconds slept after each eth_call; 0 = none. Raise only if an endpoint
+      # starts answering "limit exceeded" (the limit is concurrency, not volume).
+      - EVM_THROTTLING=${EVM_THROTTLING:-0}
+      # Checkpoints persisted per transaction; bounds work lost to an interrupted sync.
+      - EVM_BATCH_SIZE=${EVM_BATCH_SIZE:-10}
       - NOTIFY_TYPE=${NOTIFY_TYPE:-}
       - NOTIFY_TG_BOT_KEY=${NOTIFY_TG_BOT_KEY:-}
       - NOTIFY_TG_USER_ID=${NOTIFY_TG_USER_ID:-}

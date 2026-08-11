@@ -12,7 +12,7 @@
         "ext-ctype": "*",
         "guzzlehttp/guzzle": "^7.10",
         "php-http/guzzle7-adapter": "^1.1",
-        "denpa/php-bitcoinrpc": "^2.1",
+        "denpa/php-bitcoinrpc": "^2.2",
         "web3p/web3.php": "^0.3.2",
         "bitwasp/bech32": "^0.0.1",
         "irazasyed/telegram-bot-sdk": "^3.16",

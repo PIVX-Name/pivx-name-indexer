@@ -14,8 +14,31 @@ class Protocol
 
     protected static array $commandArgsCountCache = [];
 
-    // available domain zones
+    /// Slack allowed between a command's nonce and its block timestamp, in seconds.
+    /// Covers client clock skew without letting a nonce be pushed far into the future.
+    public const int NONCE_FUTURE_TOLERANCE = 300;
+
+    // available domain zones. Must equal pins-core's ALLOWED_ZONES.
     protected const array DOMAIN_ZONES = ['pivx', 'private', 'secure', 'safe'];
+
+    /**
+     * Accepted PIVX Sapling address shape, per network. Mirrors pins-core's EXPECTED_HRP
+     * and EXPECTED_ADDRESS_LEN, which the circuit enforces.
+     *
+     * The lengths are not arbitrary: a Sapling payment address is 43 bytes (11-byte
+     * diversifier + 32-byte pk_d), which bech32 encodes as ceil(43*8/5)=69 data characters
+     * plus a 6-character checksum, plus the separator - so hrp length + 76.
+     *
+     * The legacy `ptestsapling` testnet form (88 characters) is deliberately absent: it is
+     * rejected on both networks, matching the circuit.
+     */
+    protected const array NETWORK_ADDRESS_RULES = [
+        'mainnet' => ['hrp' => 'ps',  'len' => 78],
+        'testnet' => ['hrp' => 'pts', 'len' => 79],
+    ];
+
+    /** Decoded payload length of a Sapling payment address. */
+    public const int SAPLING_PAYLOAD_LEN = 43;
 
     // OPs
     public const string OP_REG = 'REG';
@@ -76,28 +99,30 @@ class Protocol
     ];
 
     public const array PRICES_REG = [
-        // TODO back to production prices
-        1 => 15,
-        2 => 12,
-        3 => 10,
-        4 => 8,
-        5 => 6,
-        6 => 4,
-        7 => 2,
+        // Denominated in SATOSHI, matching the units the indexer compares against:
+        // pivxd reports a shielded output's value as a decimal PIVX string, which
+        // convertAmount() scales by 1e8 before paymentAmountValid() checks it.
+        //
+        // These are the Beta/testnet figures published in the docs (15/12/10/8/6/4/2
+        // PIVX). Update both together - the docs are the user-facing contract.
+        1 => 1500000000, // 15 PIVX
+        2 => 1200000000, // 12 PIVX
+        3 => 1000000000, // 10 PIVX
+        4 =>  800000000, //  8 PIVX
+        5 =>  600000000, //  6 PIVX
+        6 =>  400000000, //  4 PIVX
+        7 =>  200000000, //  2 PIVX
     ];
     public const array PRICES_UPD = [
-        // TODO back to production prices
-        1 => 7,
-        2 => 6,
-        3 => 5,
-        4 => 4,
-        5 => 3,
-        6 => 2,
-        7 => 1,
+        // Satoshi, as above. Published figures: 7/6/5/4/3/2/1 PIVX.
+        1 => 700000000, // 7 PIVX
+        2 => 600000000, // 6 PIVX
+        3 => 500000000, // 5 PIVX
+        4 => 400000000, // 4 PIVX
+        5 => 300000000, // 3 PIVX
+        6 => 200000000, // 2 PIVX
+        7 => 100000000, // 1 PIVX
     ];
-
-    // TODO remove in prod
-    public static int $block = 0;
 
     public static function init(Database $db): void
     {
@@ -106,20 +131,26 @@ class Protocol
 
     /**
      * @param string $command
-     * @param string $txAmount
+     * @param int $txAmount
+     * @param int $blockTime
      * @param bool $preCheck
      * @return array
      * @throws RuntimeException
      */
-    public static function parseCommand(string $command, string $txAmount, bool $preCheck = false): array
-    {
+    public static function parseCommand(
+        string $command,
+        int $txAmount,
+        int $blockTime,
+        bool $preCheck = false
+    ): array {
         $out = [];
         $parts = explode(':', $command);
 
         foreach (self::PROTOCOL_HEADER as $param => $index) {
             if (!isset($parts[$index]) ||
                 match ($param) {
-                    'marker' => $parts[$index] === 'PiNS',
+                    // PROTOCOL_MARKER: the wire marker carries the network prefix (tPiNS on testnet).
+                    'marker' => $parts[$index] === PROTOCOL_MARKER,
                     'version' => $parts[$index] === '1',
                     'op' => in_array($parts[$index], self::OP_LIST, true),
                     'domain_name' => self::isDomainNameValid($parts[$index]),
@@ -161,12 +192,27 @@ class Protocol
                     match ($param) {
                         'target_address' => self::isAddressValid($parts[$index]),
                         'pubkey' => self::isValidEd25519Pubkey($parts[$index]),
-                        'nonce', 'price' => is_int($parts[$index] = (int)$parts[$index]) && $parts[$index] > 0,
+                        // ctype_digit rejects whitespace, a leading '+' and any non-digit;
+                        // FILTER_VALIDATE_INT additionally rejects leading zeros and values
+                        // that overflow PHP_INT_MAX. Together they accept only the exact
+                        // canonical decimal form, so one command has exactly one valid memo.
+                        'nonce', 'price' => ctype_digit($parts[$index]) &&
+                            filter_var($parts[$index], FILTER_VALIDATE_INT) !== false &&
+                            is_int($parts[$index] = (int)$parts[$index]) && $parts[$index] > 0 &&
+                            // Upper-bound the nonce against the block's own timestamp. A
+                            // command is signed before it is broadcast, so its nonce cannot
+                            // legitimately exceed the block that carries it.
+                            // NONCE_FUTURE_TOLERANCE absorbs ordinary client clock skew;
+                            // it is a constant, so it stays deterministic.
+                            ($param === 'price' ||
+                                ($param === 'nonce' &&
+                                    $parts[$index] <= $blockTime + self::NONCE_FUTURE_TOLERANCE)),
                         // skip sign check if this is pre-check for OP_CHG
                         'signature' => ($preCheck && $out['op'] === self::OP_CHG) ||
                             (
                                 strlen($parts[$index]) === 128 &&
                                 ctype_xdigit($parts[$index]) &&
+                                strtolower($parts[$index]) === $parts[$index] &&
                                 sodium_crypto_sign_verify_detached(
                                     hex2bin($parts[$index]),
                                     implode(':', array_slice($parts, 0, $partsCount - 1)),
@@ -191,14 +237,14 @@ class Protocol
                     self::$domainsCache[$out['domain_name']]['nonce'] >= $out['nonce'] ||
                     // if OP_UPD and nothing to change
                     ($out['op'] === self::OP_UPD && self::$domainsCache[$out['domain_name']]['target_address'] === $out['target_address']) ||
+                    // if OP_BUY and TX Amount not equal the selling price of the domain
+                    ($out['op'] === self::OP_BUY && $txAmount !== self::$domainsCache[$out['domain_name']]['price']) ||
                     // owner hasn't changed via CHG / there's no point to BUY from yourself
                     (in_array($out['op'], [self::OP_CHG, self::OP_BUY], true) && self::$domainsCache[$out['domain_name']]['owner_pubkey'] === $out['pubkey']) ||
                     // if OP_UPD or OP_CHG called on the domain which is on sale
                     (in_array($out['op'], [self::OP_UPD, self::OP_CHG], true) && self::$domainsCache[$out['domain_name']]['price'] !== 0) ||
                     // if OP_ULT or OP_BUY called on the domain which is not on sale
                     (in_array($out['op'], [self::OP_ULT, self::OP_BUY], true) && self::$domainsCache[$out['domain_name']]['price'] === 0) ||
-                    // if OP_BUY and TX Amount not equal the selling price of the domain
-                    ($out['op'] === self::OP_BUY && bccomp($txAmount, (string)self::$domainsCache[$out['domain_name']]['price'], 8) !== 0) ||
                     // on any update check that the operation is initiated by the domain owner
                     (in_array($out['op'], [self::OP_UPD, self::OP_LST, self::OP_ULT], true) && self::$domainsCache[$out['domain_name']]['owner_pubkey'] !== $out['pubkey'])
                 ) {
@@ -249,7 +295,10 @@ class Protocol
             !in_array($domainNameParts[1], self::DOMAIN_ZONES, true)) {
             return false;
         }
-        if (!preg_match("/^[a-z0-9-]+$/", $domainNameParts[0])) {
+        // The D modifier is REQUIRED: without it PCRE lets `$` match before a trailing
+        // newline, so "test\n.pivx" would be accepted here while the SP1 circuit
+        // rejects it — an unprovable batch that halts the checkpoint chain.
+        if (!preg_match("/^[a-z0-9-]+$/D", $domainNameParts[0])) {
             return false;
         }
 
@@ -257,6 +306,22 @@ class Protocol
     }
 
     /**
+     * Validates a PIVX Sapling shielded address for the configured network.
+     *
+     * Four checks, matching pins_core::is_address_valid exactly. Anything the circuit
+     * refuses but this accepts becomes a command the indexer queues and the prover then
+     * cannot prove, stalling the batch — so the two must not drift.
+     *
+     * 1. Canonical lowercase. Bech32's checksum is case-insensitive, so the uppercase
+     *    spelling decodes to the same payload; accepting both would give one address two
+     *    spellings, hashing to two different leaves.
+     * 2. Exact character length for this network.
+     * 3. Exact HRP for this network, so a testnet address cannot be registered against
+     *    mainnet state or vice versa.
+     * 4. Decoded payload of exactly 43 bytes. This is NOT implied by (2): bech32 pads to
+     *    5-bit groups, so payloads of different byte lengths can encode to the same number
+     *    of characters.
+     *
      * @param string $address
      * @return bool
      */
@@ -267,19 +332,27 @@ class Protocol
             return false;
         }
 
-        // Validate Bech32 addresses (Sapling / Unified)
+        $rules = self::NETWORK_ADDRESS_RULES[COIN_NETWORK];
+        if (strlen($address) !== $rules['len']) {
+            return false;
+        }
+
+        // Validate the Bech32 Sapling address
         try {
-            [$hrp] = BitWasp\Bech32\decode($address);
-            // Verify PIVX network Human Readable Parts (HRP)
-            // TODO remove block check
-            if (self::$block > 48210) {
-                if ($hrp !== 'ptestsapling' || strlen($address) !== 88) {
-                    return false;
-                }
-            } else {
-                if ($hrp !== 'pts' || strlen($address) !== 79) {
-                    return false;
-                }
+            [$hrp, $data] = BitWasp\Bech32\decode($address);
+            // Verify PIVX network Human Readable Part (HRP)
+            if ($hrp !== $rules['hrp']) {
+                return false;
+            }
+            // decode() has already stripped the 6-character checksum group, so $data is
+            // just the payload in 5-bit groups. pad = false makes convertBits throw on a
+            // non-zero final pad, which the catch below turns into a rejection — the same
+            // strictness pins-core gets from bech32::convert_bits(.., false).
+            //
+            // count(), not strlen(): convertBits returns an array of bytes.
+            if (count(BitWasp\Bech32\convertBits($data, count($data), 5, 8, false))
+                !== self::SAPLING_PAYLOAD_LEN) {
+                return false;
             }
         } catch (BitWasp\Bech32\Exception\Bech32Exception) {
             return false;
@@ -296,7 +369,7 @@ class Protocol
     {
         // Basic length check (Must be exactly 32 bytes / 64 hex chars)
         // Enforce hexadecimal characters of length 64
-        if (strlen($pubkeyHex) !== 64 || !ctype_xdigit($pubkeyHex)) {
+        if (strlen($pubkeyHex) !== 64 || !ctype_xdigit($pubkeyHex) || strtolower($pubkeyHex) !== $pubkeyHex) {
             return false;
         }
 
@@ -326,7 +399,7 @@ class Protocol
                 'domains_history',
                 ['target_address', 'owner_pubkey', 'nonce', 'price'],
                 ['domain_name' => $domain],
-                'ORDER BY `domain_block_id` DESC LIMIT 1'
+                'ORDER BY `domain_block_id` DESC, `nonce` DESC LIMIT 1'
             )) === false) {
                 throw new RuntimeException(
                     'Failed to query domains for existence check',
@@ -346,14 +419,14 @@ class Protocol
 
     /**
      * @param array $command
-     * @param string $amount
+     * @param int $amount
      * @return bool
      */
-    public static function paymentAmountValid(array $command, string $amount): bool
+    public static function paymentAmountValid(array $command, int $amount): bool
     {
         // for BUY, the TX amount is the domain selling price
         return $command['op'] === self::OP_BUY ||
-            bccomp($amount, (string)self::getDomainPrice($command['domain_name'], $command['op']), 8) === 0;
+            $amount === self::getDomainPrice($command['domain_name'], $command['op']);
     }
 
     /**
@@ -368,6 +441,15 @@ class Protocol
             return self::PRICES_REG[min($len, 7)];
         }
         return self::PRICES_UPD[min($len, 7)];
+    }
+
+    /**
+     * @param string $amount
+     * @return int
+     */
+    public static function convertAmount(string $amount): int
+    {
+        return (int)bcmul($amount, '100000000', 0);
     }
 
     /**

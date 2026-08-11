@@ -1,3 +1,10 @@
-* * * * * root /usr/local/bin/indexer sync >> /var/log/indexer/sync-cron.log 2>&1
-59 23 * * * root /usr/sbin/logrotate /etc/logrotate.conf >> /var/log/indexer/logrotate-cron.log 2>&1
+# Indexer schedule. Cron rather than systemd timers, because this image has no init system.
+#
+# Deliberately no flock wrapper: the sync takes its own lock and raises the alert when it
+# finds one already held past SYNC_LOCK_STALE_SEC. Wrapping it would skip the run before PHP
+# starts, so that alert could never fire and a wedged sync would go unreported.
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin
 
+* * * * * root /usr/local/bin/indexer sync >> /var/log/indexer/sync-cron.log 2>&1
+17 3 * * * root /usr/sbin/logrotate /etc/logrotate.conf >> /var/log/indexer/logrotate-cron.log 2>&1

@@ -13,8 +13,15 @@ use Indexer\Protocol;
 $lookupType = 'name';
 if (!Protocol::isDomainNameValid($domainName = strtolower($uri[2] ?? ''))) {
     if (!isset($uri[3]) || !in_array($uri[2], ['reverse', 'owner'], true) ||
-        ($uri[3] === 'reverse' && Protocol::isAddressValid($domainName)) ||
-        ($uri[3] === 'owner' && !Protocol::isValidEd25519Pubkey($domainName))) {
+        // Validate $uri[3] - the actual value. $domainName still holds
+        // strtolower($uri[2]) here, i.e. the literal word "reverse"/"owner"; the
+        // destructuring that loads the real value runs only after this guard passes.
+        // Neither value is lowercased on the way in, and neither should be: both
+        // validators require canonical lowercase form (see isAddressWellFormed and
+        // isValidEd25519Pubkey), which is what keeps the host and the circuit
+        // agreeing on the bytes.
+        ($uri[2] === 'reverse' && !Protocol::isAddressValid($uri[3])) ||
+        ($uri[2] === 'owner' && !Protocol::isValidEd25519Pubkey($uri[3]))) {
         throw new RuntimeException(API_ERROR_WRONG_INCOMING_PARAM_VALUE, INT_EXC_API_ERROR);
     }
     [,,$lookupType, $domainName] = $uri;
@@ -32,11 +39,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $qAdd = '';
     if (isset($input['extended']) && $input['extended'] === true) {
         $request['extended'] = true;
-        $qAdd .= ', `domains`.`created_block_id`, `domains`.`updated_block_id`, `domains_history`.`domain_tx`';
+        $qAdd .= ', `domains`.`created_block_id`, `domains_history`.`domain_tx`';
     }
 
-    if (isset($input['with_checkpoint']) && is_bool($input['with_checkpoint'])) {
+    if (isset($input['with_checkpoint']) && $input['with_checkpoint'] === true) {
         $request['with_checkpoint'] = $input['with_checkpoint'];
+    }
+
+    if ($request['extended'] === true || $request['with_checkpoint'] === true) {
+        $qAdd .= ', `domains`.`updated_block_id`';
     }
 }
 
@@ -49,10 +60,12 @@ $where = match ($lookupType) {
 $map = ['{:target:}' => $domainName];
 
 $qr = $db->doPlainQuery(
-    'SELECT `domains`.`domain_name`, `domains_history`.`target_address`, `domains_history`.`owner_pubkey`, `domains_history`.`price`, `domains_history`.`nonce`' . $qAdd .
+    'SELECT `domains`.`domain_name`, `domains_history`.`target_address`, `domains_history`.`owner_pubkey`,
+            `domains_history`.`price`, `domains`.`nonce`' . $qAdd .
     ' FROM `domains`
     LEFT JOIN `domains_history` ON `domains_history`.`domain_name` = `domains`.`domain_name`
                                 AND `domains_history`.`domain_block_id` = `domains`.`updated_block_id`
+                                AND `domains_history`.`nonce` = `domains`.`nonce`
     WHERE ' . $where,
     $map
 );
@@ -74,30 +87,41 @@ foreach ($dbData as $oneDomain) {
     $out[] = $oneDomain;
     $index = array_key_last($out);
 
-    // Fetch the proof (Returns an array of 128 raw byte arrays)
-    $rawProof = $smt->getProof($oneDomain['domain_name']);
-    // Convert the raw bytes to a clean JSON array of Hex strings for the API
+    // Fetch the proof and the root it was built from in a single call. Both come
+    // from one database snapshot, so a commit landing mid-request can no longer
+    // return a proof that fails to verify against the root beside it.
+    $smtState = $smt->getProofWithRoot($oneDomain['domain_name']);
+
+    // Convert the raw bytes to a clean JSON array of Hex strings for the API.
+    //
+    // The tree is compact now, so a proof is variable length and the sibling list
+    // alone is no longer enough to verify one: a verifier also needs the depth and
+    // the terminal kind. `merkle_proof` keeps its existing name and shape so current
+    // consumers are unaffected, and the fields beside it carry the rest.
     $hexProof = [];
-    foreach ($rawProof as $siblingBytes) {
+    foreach ($smtState['proof']['siblings'] as $siblingBytes) {
         // Pack the bytes back into a string, then convert to hex
         $hexProof[] = bin2hex(pack('C*', ...$siblingBytes));
     }
     // Get the current root
     if (!isset($input['with_checkpoint']) || $input['with_checkpoint'] === false) {
-        $rootBytes = $smt->getRoot();
         $out[$index] += [
-            'smt_root' => bin2hex(pack('C*', ...$rootBytes)),
+            'smt_root' => bin2hex(pack('C*', ...$smtState['root'])),
         ];
     }
 
     $out[$index] += [
-        'merkle_proof' => $hexProof
+        'merkle_proof' => $hexProof,
+        'proof_depth' => $smtState['proof']['depth'],
+        // "Occupied" or "Vacant", or {"Blocked":{"record":{…}}} when another domain
+        // holds this slot in the compact tree.
+        'proof_terminal' => $smtState['proof']['terminal'],
     ];
 
     if ($request['with_checkpoint']) {
         $qr = $db->doSelect(
             'checkpoints',
-            ['block_id', 'smt_root', 'evm_block_id', 'evm_tx_hash'],
+            ['idx', 'block_id', 'smt_root'],
             ['block_id' => ['sign' => '>=', 'value' => $oneDomain['updated_block_id']]],
             'ORDER BY `block_id` DESC LIMIT 1',
         );

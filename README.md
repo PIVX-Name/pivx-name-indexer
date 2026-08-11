@@ -1,6 +1,8 @@
 # PIVX Name Indexer
 
-The **PIVX Name Indexer** is a core back-end component of the **PIVX Name Service (PNS)** ecosystem. It acts as a high-performance synchronization daemon and query API that indexes domain name operations directly from the PIVX blockchain, utilizing an EVM-based rollup contract to ensure data integrity and validate Sparse Merkle Tree (SMT) roots.
+The **PIVX Name Indexer** is a core back-end component of the **PIVX Name Service (PiNS)** ecosystem. It reconstructs the entire domain-name state by scanning shielded PIVX transactions, maintains that state in a Sparse Merkle Tree, and cross-checks its own tree against the roots anchored on an EVM contract.
+
+Anyone can run it. That is the point: PiNS is secured by *public, deterministic replication*, and this daemon is the thing that replicates.
 
 ---
 
@@ -10,29 +12,219 @@ Detailed installation guides, architecture overview, and API references are avai
 
 ---
 
+## 🔐 Trust Model — read this first
+
+PiNS is **not** secured by its ZK proof alone, and it is **not** a trusted-sequencer system.
+
+**How commands reach the protocol.** A user sends a shielded PIVX note to the registrar's protocol Sapling address. The **amount is the payment** and the **encrypted memo is the signed command** — both in the same note, so intent and payment are atomically bound with no separate reference needed. Block height, index within the block, and output index give every command a deterministic total order.
+
+**Why anyone can check the registrar.** The registrar publishes the protocol address *and its viewing key* — this indexer serves both from `/v1.0/info` (see below). Any third party can therefore:
+
+1. import that key into a PIVX Core wallet and recover every command and payment from genesis, in canonical order (`viewshieldtransaction`);
+2. replay them through this open-source indexer, which implements the same protocol;
+3. compute the SMT root independently;
+4. compare it against the root anchored on-chain.
+
+A registrar that censors a paid command, invents a transfer, mis-credits, or reorders produces a root that **every** independent indexer contradicts. Deviation is publicly detectable by anyone, without permission or special access.
+
+**What the ZK proof is actually for.** It lets the EVM anchor contract accept a state root without scanning PIVX. It proves the transition rules were followed given the supplied inputs. It does **not** prove the inputs were the real chain command stream — replication does that job, and does it better, because an indexer sees the decrypted amount and memo while a circuit would only see a note commitment.
+
+**Property: fraud-evident, not fraud-preventing.** A bad batch can land on-chain and be contradicted afterwards; recovery is social, not automatic.
+
+---
+
 ## 🚀 Key Features
 
-* **Dual-State Synchronizer**: Processes and parses PIVX Core shielded transactions (`viewshieldtransaction`) alongside EVM checkpoint events (`RootUpdated`) to maintain state parity.
-* **Sparse Merkle Tree (SMT)**: Validates cryptographic proofs using a 128-bit deep SMT backed by RocksDB and optimized with an in-memory batching cache.
-* **Database Consistency**: Utilizes MySQL/MariaDB two-phase commit transactions (XA Transactions) with automatic crash-recovery protocols to prevent state mismatch between MySQL and RocksDB.
-* **Domain Resolution APIs**: Exposes forward resolution (name lookup), reverse resolution (address lookup), owner query endpoints, checkpoint registries, and historical state changes.
+* **Dual-State Synchronizer**: Parses shielded PIVX transactions (`viewshieldtransaction`) alongside the checkpoints read from the anchor contract's own state, and refuses to advance when the two disagree. Checkpoints come from `eth_call` against `rootChain`, never from event logs — public RPC endpoints refuse `eth_getLogs` outright, and a log stream would still report a rolled-back root as current.
+* **Compact Sparse Merkle Tree**: A 128-level keyspace in which each leaf floats up to the shallowest depth where its key prefix is unique — so a tree holding *n* domains stores roughly *n* nodes, not 128 per key. Backed by RocksDB through the [`rr-proxy`](https://github.com/PIVX-Name/pivx-name-rr-proxy) daemon.
+* **Database Consistency**: MySQL two-phase commit (XA) with automatic crash recovery, so MySQL and RocksDB cannot drift apart after a failed commit.
+* **Domain Resolution APIs**: Forward resolution, reverse resolution, owner lookup, checkpoint registry, per-domain history, and Merkle proofs for any of them.
+* **Self-Verification**: `/v1.0/info` reports `indexer_synced` — whether this node's own computed root matches the last root anchored on-chain.
+
+---
+
+## 🌳 The Compact Sparse Merkle Tree
+
+Two properties surprise people coming from a dense SMT, and both are deliberate:
+
+* **An empty subtree is 32 zero bytes at every height.** There is no ladder of precomputed empty-node hashes. Consequently **the root of an empty tree is all zeros** — a freshly started `rr-proxy` reporting `0000…0000` from `/v1.0/getRoot` is correct, not broken.
+* **Domain-separation tags are load-bearing.** Leaves are `SHA256(0x00 ‖ …)` and internal nodes `SHA256(0x01 ‖ L ‖ R)`. In a dense tree these were defence in depth; in the compact tree, where a leaf can appear at any depth, they are what prevents leaf/node confusion.
+
+A proof therefore carries a `depth`, the sibling list, and a `terminal` describing what was found at the end of the path: `Occupied` (the key is present), `Vacant` (the subtree is empty), or `Blocked` (a *different* key already occupies that slot — the proof then includes that key's full record, which is required for soundness).
+
+The full specification lives in the prover repository at `docs/compact-smt.md`, together with an independent Python implementation used to generate golden vectors. This indexer, the `rr-proxy` daemon, and the SP1 circuit must all agree byte-for-byte with it.
+
+---
+
+## 📡 Protocol Summary
+
+Commands are ZIP-302 memos of the form:
+
+```
+PiNS:1:<OP>:<domain>:<args…>:<nonce>:<ed25519-signature>
+```
+
+On testnet the marker is `tPiNS`, so a signature produced for one network can never be
+replayed on the other.
+
+| OP | Meaning | Signed by |
+|:---|:---|:---|
+| `REG` | Register a new domain | registrant |
+| `UPD` | Update the target address | current owner |
+| `CHG` | Transfer the domain to a new owning pubkey | current owner |
+| `LST` | List on the marketplace at a price | owner — this signature *is* the standing offer to sell |
+| `ULT` | Delist: withdraw a listing, resetting the price to zero | owner |
+| `BUY` | Purchase a listed domain | buyer — the seller's `LST` supplies the other half of the agreement |
+
+There is no separate seller signature on a sale: `LST` pins the price into the tree, and the circuit binds a `BUY` to it by asserting the listed price is non-zero and unchanged. Symmetrically, `ULT` is only valid on a domain that *is* listed.
+
+Supported zones: `.pivx`, `.private`, `.secure`, `.safe`.
+
+Target addresses are Sapling shielded addresses — `ps1…` (78 characters) on mainnet, `pts1…` (79) on testnet — validated in PHP against the same Bech32 rules the circuit enforces.
+
+Prices are length-tiered (1-character labels cost the most) and defined as protocol constants
+in `include/Protocol.php`; the registrar serves them from its `/v1.0/prices` endpoint.
+
+| Label length | Register (once) | Update address |
+|:---|:---|:---|
+| 1 character | 15 PIVX | 7 PIVX |
+| 2 | 12 PIVX | 6 PIVX |
+| 3 | 10 PIVX | 5 PIVX |
+| 4 | 8 PIVX | 4 PIVX |
+| 5 | 6 PIVX | 3 PIVX |
+| 6 | 4 PIVX | 2 PIVX |
+| 7 or more | 2 PIVX | 1 PIVX |
+
+---
+
+## 🌐 HTTP API
+
+All endpoints live under `/v1.0/` and answer `{"response": …}` or `{"error":{"error_message": …}}`. `GET` returns defaults; `POST` with a JSON body selects options.
+
+### `GET /v1.0/info`
+Node status. `POST {"extended": true}` additionally returns the domain count and — importantly — the registrar address and viewing key needed to replicate independently.
+
+```json
+{"response":{
+  "last_processed_coin_block": 3422048,
+  "last_checkpoint": {"idx": 42, "block_id": 3422048, "smt_root": "b4c9dacf…"},
+  "indexer_smt_root": "b4c9dacf…",
+  "anchored_smt_root": "b4c9dacf…",
+  "indexer_synced": true,
+  "checkpoints_behind": false,
+  "domains_count": 0,
+  "registrar_address": "u146xylzx0…",
+  "registrar_viewing_key": "uview…"
+}}
+```
+
+`indexer_synced` is the value to watch: `false` means this node's computed root does not match the last anchored checkpoint — either it is still catching up, or it disagrees with the registrar.
+
+### `GET /v1.0/getRoot`
+The current SMT root as hex. All zeros means the tree is empty.
+
+### `GET /v1.0/resolve/{domain}`
+Forward resolution, with the Merkle proof for the answer.
+
+* `GET /v1.0/resolve/reverse/{address}` — every domain pointing at an address.
+* `GET /v1.0/resolve/owner/{pubkey}` — every domain held by an Ed25519 pubkey.
+* `POST {"extended": true}` adds creation/update block IDs and the originating transaction.
+* `POST {"with_checkpoint": true}` returns the anchored checkpoint instead of the live root, so a client can verify the proof against a value that exists on-chain.
+
+Responses carry `merkle_proof`, `proof_depth`, and `proof_terminal`, which are exactly what a client needs to verify inclusion without trusting this server.
+
+### `GET /v1.0/checkpoints`
+Anchored checkpoints, newest first. `POST` accepts `order`, `count`, `from_block`.
+
+### `GET /v1.0/history/{domain}`
+Every recorded state change for a domain. `POST` accepts `order`, `count`, `from_block_id`.
+
+Sample requests for every endpoint are kept as `.http` files in [`api/dev/`](api/dev/).
 
 ---
 
 ## 🛠️ System Requirements
 
-* **PHP**: version 8.1 or higher (with `mysqli`, `sodium`, and `bcmath` extensions).
-* **Database**: MySQL 8.0+ or MariaDB (configured with `XA_RECOVER_ADMIN` privileges).
-* **Key-Value Store**: RocksDB accessed via the [**rr-proxy**](http://github.com/PIVX-Ninja/pivx-name-rr-proxy) socket daemon.
+* **PHP**: 8.5 (pinned in the Docker image and used in production) with `mysqli`, `sodium`, `bcmath` and `ctype`.
+  `sodium` is compiled into the PHP 8.5 binary on Debian/Sury, so there is no separate `php8.5-sodium` package to install.
+* **Database**: **MySQL 8.0+** (8.4 LTS in the Docker image), with the `XA_RECOVER_ADMIN` privilege — the indexer inspects and resolves prepared XA transactions on startup.
+  **MariaDB will not work.** The schema uses the `utf8mb4_0900_ai_ci` collation, which MariaDB does not implement, and `XA_RECOVER_ADMIN` is a MySQL privilege with no MariaDB equivalent. This is a hard incompatibility, not a preference.
+* **Key-Value Store**: RocksDB accessed via the [**rr-proxy**](https://github.com/PIVX-Name/pivx-name-rr-proxy) socket daemon, which owns the compact SMT implementation.
 * **Nodes**:
-  * PIVX Core daemon (synced with Masternode list).
-  * EVM RPC node supporting Arbitrum or arbitrary Ethereum-compatible JSON-RPC.
+  * **PIVX Core** (`pivxd`) with JSON-RPC enabled and the registrar's extended viewing key imported.
+    Shielded notes are decrypted by the node itself through `viewshieldtransaction`, so there is no
+    separate scanner binary to install — address validation is pure PHP.
+    The wallet needs no spending key: a viewing key is enough to read the command stream.
+  * EVM RPC node for the chain the anchor contract is deployed on (any Ethereum-compatible JSON-RPC).
+
+---
+
+## ⚙️ Configuration
+
+Runtime configuration lives in `config/<RELEASE_TYPE>.inc.php`; start from [`config/release.inc.php.sample`](config/release.inc.php.sample). Values that matter most:
+
+| Constant | Notes |
+|:---|:---|
+| `DB_CONFIG` | MySQL connection. |
+| `RPC_CONFIG` | PIVX Core JSON-RPC connection — host, port, user and password. All four are required; the Docker entrypoint refuses to start without them. |
+| `EVM_NETWORK` | Chain ID, anchor contract address and ABI path. |
+| `INDEXER_ROCKSDB_PROXY_SOCKET_PATH` | Unix socket of the `rr-proxy` daemon. |
+| `SMT_GENESIS_ROOT` | **Must equal the genesis root the anchor contract was deployed with.** For a chain anchored from the registrar wallet's birthday this is all zeros — the empty tree. |
+| `COIN_GENESIS_BLOCK` | The wallet birthday: the block before which no service transaction can exist. |
+| `EVM_THROTTLING` | Microseconds to sleep after each `eth_call`. `0` suits most endpoints; raise it only if one starts answering *limit exceeded*. |
+| `EVM_BATCH_SIZE` | Checkpoints fetched and persisted per database transaction, bounding how much an interrupted sync loses. |
+| `INCOME_WALLET` / `INCOME_WALLET_VIEW_KEY` | The published protocol address and its viewing key. |
+| `NOTIFY_*` | Telegram alerting for fatal conditions. |
+
+> ⚠️ The viewing key, `COIN_NETWORK` and the PIVX Core node must all describe the same network. A testnet
+> viewing key (`ptxviews1…`) against a mainnet node simply decrypts nothing, which looks identical to
+> "no commands have been sent yet" — the failure is silent, so check it first when a fresh node stays empty.
+
+Database schema: [`resources/schema.sql`](resources/schema.sql) (tables `checkpoints`, `domains`, `domains_history`, `marketplace`, `params`, `rpc_list`).
+
+At least one row in `rpc_list` for the configured chain is required; the indexer refuses to start without one.
+
+Give each row a **distinct `issue_ts`** (0, 1, 2, …). The indexer selects the endpoint with the lowest value and has no tiebreaker, so equal values leave the choice to the database and make endpoint-specific problems unreproducible. A failing endpoint is stamped with the current unix time, which sorts far behind these seeds — so healthy endpoints are always preferred, and once every endpoint has failed at some point they are tried least-recently-failed first. The Docker entrypoint seeds them this way automatically.
+
+---
+
+## 🖥️ Command Line
+
+```bash
+php indexer.php sync       # one synchronization iteration (what the timer runs)
+php indexer.php watchdog   # read-only stalled-lock check (what the watchdog timer runs)
+php indexer.php clean confirm   # DESTRUCTIVE: truncate all tables, clear RocksDB, reseed genesis
+```
+
+`clean` resets the node for a from-scratch resynchronization and requires the literal word `confirm`.
 
 ---
 
 ## 🐳 Docker Deployment
 
 The indexer can be deployed easily as a Docker container. There are two ways to spin up the container: **from the GitHub Container Registry (GHCR) image** (recommended for production) or **built from local source files**.
+
+A single self-contained image: MySQL 8.4, the `rr-proxy` SMT daemon, PHP-FPM 8.5, nginx
+and cron. That is deliberately not one-process-per-container — the value of an independent
+indexer comes from how many people actually run one, and a single `docker compose up`
+reaches far more of them than a multi-service topology would.
+
+The usual objection is handled rather than waved away: the entrypoint supervises every
+service and **stops the container if any one of them dies**, so it never sits "up" with a
+dead indexer inside. Combined with `restart: unless-stopped`, a crashed service becomes a
+restart rather than a silent outage.
+
+| Component | Version |
+|:---|:---|
+| Base | Debian 13 (trixie) slim |
+| MySQL | 8.4 LTS |
+| PHP | 8.5 (FPM + CLI) |
+| nginx | 1.30 stable (pinned; Debian trixie ships 1.26) |
+| Scheduler | cron (no init system in the image) |
+| Logs | logrotate, covering indexer, rr-proxy, nginx and MySQL |
+
+State lives in three named volumes — `mysql_data`, `rr_proxy_db`, `indexer_logs` — so
+replacing the container keeps the synced chain state.
 
 ### Prerequisites
 Make sure you have [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) installed on your server.
@@ -45,14 +237,14 @@ To run the indexer using the official pre-built image from GitHub Packages witho
 
 1. Download the `docker-compose.yml` and `env.sample` files from the repository's `resources/docker/` directory:
    ```bash
-   curl -L -o docker-compose.yml https://raw.githubusercontent.com/PIVX-Ninja/pivx-name-indexer/master/resources/docker/docker-compose.yml
-   curl -L -o env.sample https://raw.githubusercontent.com/PIVX-Ninja/pivx-name-indexer/master/resources/docker/env.sample
+   curl -L -o docker-compose.yml https://raw.githubusercontent.com/PIVX-Name/pivx-name-indexer/main/resources/docker/docker-compose.yml
+   curl -L -o env.sample https://raw.githubusercontent.com/PIVX-Name/pivx-name-indexer/main/resources/docker/env.sample
    ```
 2. Copy `env.sample` to `.env`:
    ```bash
    cp env.sample .env
    ```
-3. Open `.env` and fill in your PIVX wallet RPC and EVM RPC settings:
+3. Open `.env` and fill in your PIVX Core RPC and EVM RPC settings:
    ```bash
    nano .env
    ```
@@ -69,12 +261,12 @@ To build the Docker image yourself from the source code:
 
 1. Clone this repository and navigate to the root directory:
    ```bash
-   git clone https://github.com/PIVX-Ninja/pivx-name-indexer.git
+   git clone https://github.com/PIVX-Name/pivx-name-indexer.git
    cd pivx-name-indexer
    ```
 2. Build the Docker image locally:
    ```bash
-   docker build -t ghcr.io/pivx-ninja/pivx-name-indexer:latest -f resources/docker/Dockerfile .
+   docker build -t ghcr.io/pivx-name/pivx-name-indexer:latest -f resources/docker/Dockerfile .
    ```
 3. Navigate to the `resources/docker` directory:
    ```bash
@@ -123,6 +315,16 @@ Use these standard commands from the directory containing your `docker-compose.y
 
 ---
 
+### ⚠️ `EVM_CHAIN_ID` must match the anchor contract's chain
+
+`rpc_list` is queried **by chain id**. Endpoints filed under the wrong one are invisible to
+the indexer, so it never syncs a checkpoint — and this produces no error, because "no
+endpoints for this chain" is indistinguishable from "nothing to do". `EVM_CHAIN_ID`
+(default `56`, BNB Smart Chain) must equal `EVM_NETWORK.chain_id` in the configuration.
+
+Endpoints are seeded from `EVM_RPC_URL` on **first start only**; afterwards, edit the
+`rpc_list` table directly.
+
 ### 🔄 Server Autostart / Restart Policy
 
 The container is configured with the `restart: unless-stopped` policy inside `docker-compose.yml`.
@@ -136,20 +338,45 @@ No additional systemd service configuration is required on the host system, as D
 
 ---
 
-## ⚙️ Periodic Execution (`resources/contrib/`)
+## ⏱️ Periodic Execution (`resources/contrib/`)
 
-The [`resources/contrib/`](resources/contrib/) directory provides production-ready templates for scheduled synchronization:
+The [`resources/contrib/`](resources/contrib/) directory provides production-ready templates for scheduled synchronization.
 
-* **Systemd Units** (Recommended):
-  * [`resources/contrib/pivx-name-indexer.service`](resources/contrib/pivx-name-indexer.service): Systemd service unit defining the indexer execution.
-  * [`resources/contrib/pivx-name-indexer.timer`](resources/contrib/pivx-name-indexer.timer): Systemd timer unit configured to start 1 minute after system boot (allowing MySQL, RPC, and `rr-proxy` services to initialize) and repeat every 30 seconds.
-* **Cron Example**:
-  * [`resources/contrib/crontab`](resources/contrib/crontab): Example crontab rules configured for 30-second interval execution.
+### Systemd (recommended)
+
+| Unit | Runs | Cadence |
+|:---|:---|:---|
+| [`pivx-name-indexer.service`](resources/contrib/pivx-name-indexer.service) + [`.timer`](resources/contrib/pivx-name-indexer.timer) | `php indexer.php sync` | 2 min after boot, then every minute |
+| [`pivx-name-indexer-watchdog.service`](resources/contrib/pivx-name-indexer-watchdog.service) + [`.timer`](resources/contrib/pivx-name-indexer-watchdog.timer) | `php indexer.php watchdog` | 5 min after boot, then every 5 minutes |
+
+**Enable the `.timer`, not the `.service`.** Each service sets `RefuseManualStart=yes` and deliberately has **no `[Install]` section** — with one, `systemctl enable` would pull the service into `multi-user.target` and run it once at boot, outside the timer's control and before its boot delay.
+
+```bash
+sudo cp resources/contrib/pivx-name-indexer*.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pivx-name-indexer.timer pivx-name-indexer-watchdog.timer
+```
+
+**Why a separate watchdog exists.** Systemd never starts a second instance of a unit while the first is still running — concurrent activations are coalesced into one pending job. That is the right behaviour here (overlapping runs would mutate the same tables and the same tree), but it means a sync run can never observe *its own* stalled lock, so the in-run alert can never fire. The watchdog restores that alert from a separate unit. Its check is strictly read-only: it inspects the lock file's age without ever acquiring it, so it cannot make a sync run skip a cycle, and it never deletes a lock it does not own. A stalled lock is reported after `SYNC_LOCK_STALE_SEC` (600s by default) and the alert repeats every 5 minutes until the lock clears.
+
+### Cron
+
+[`resources/contrib/crontab`](resources/contrib/crontab) provides 1-minute interval rules. Cron *does* start overlapping runs, so the guard inside the run reports stalled locks by itself and the watchdog units above are unnecessary.
+
+---
+
+## 🧩 Related Components
+
+| Component                                                                     | Role |
+|:------------------------------------------------------------------------------|:---|
+| [`rr-proxy`](https://github.com/PIVX-Name/pivx-name-rr-proxy)               | RocksDB socket daemon that owns the compact SMT and issues Merkle proofs. |
+| [`pivx-name-prover`](https://github.com/PIVX-Name/pivx-name-prover)        | SP1 zkVM circuit and host runner producing Groth16 proofs of batch state transitions. |
+| [`pivx-name-evm-anchor`](https://github.com/PIVX-Name/pivx-name-evm-anchor)| The EVM contract storing anchored roots and verifying proofs. |
 
 ---
 
 ## 📄 License
 
-This project is licensed under the terms of the **GNU Affero General Public License v3.0 (AGPL-3.0)**. 
+This project is licensed under the terms of the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
 
 Please refer to the [LICENSE](LICENSE) file in the root of this repository for the full text of the license.

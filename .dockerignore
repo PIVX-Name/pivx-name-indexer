@@ -1,4 +1,36 @@
-.git
-.idea
+# Deployment configuration NEVER enters the image.
+#
+# `COPY . /opt/...` previously pulled config/production.inc.php into a layer of an image
+# published to a public registry — that file holds the database password, the wallet RPC credentials
+# and the Telegram bot token. Anyone who pulled the image could read them straight out of
+# it. The container builds its own config at start-up from environment variables (see
+# resources/docker/configure.php), so no real config is needed at build time; only the
+# sample template is.
+config/*.inc.php
+!config/release.inc.php.sample
+registrar/config/*.inc.php
+!registrar/config/release.inc.php.sample
+
+# Selects which of the above to load. The entrypoint writes its own, and a stale "local"
+# here would make the container ignore the config it just generated.
+release_type
+
+# Rebuilt inside the image by composer; a host copy may hold platform-specific builds
 vendor
+
+# Not needed at runtime
+.git
+.gitignore
+.idea
+.claude
+CLAUDE.md
 .dockerignore
+Dockerfile
+docker-compose.yml
+
+# Local scratch file that exists only on a developer's machine
+1.php
+
+
+# Logs and local runtime state
+*.log
