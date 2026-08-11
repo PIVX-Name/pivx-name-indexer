@@ -102,26 +102,22 @@ class Protocol
         // Denominated in SATOSHI, matching the units the indexer compares against:
         // pivxd reports a shielded output's value as a decimal PIVX string, which
         // convertAmount() scales by 1e8 before paymentAmountValid() checks it.
-        //
-        // These are the Beta/testnet figures published in the docs (15/12/10/8/6/4/2
-        // PIVX). Update both together - the docs are the user-facing contract.
+        1 => 1000000000000, // 10000 PIVX
+        2 =>  750000000000, //  7500 PIVX
+        3 =>  240000000000, //  2400 PIVX
+        4 =>   70000000000, //   700 PIVX
+        5 =>   35000000000, //   350 PIVX
+        6 =>   17500000000, //   175 PIVX
+        7 =>    9000000000, //    90 PIVX
+    ];
+    public const array PRICES_UPD = [
         1 => 1500000000, // 15 PIVX
         2 => 1200000000, // 12 PIVX
         3 => 1000000000, // 10 PIVX
-        4 =>  800000000, //  8 PIVX
-        5 =>  600000000, //  6 PIVX
-        6 =>  400000000, //  4 PIVX
-        7 =>  200000000, //  2 PIVX
-    ];
-    public const array PRICES_UPD = [
-        // Satoshi, as above. Published figures: 7/6/5/4/3/2/1 PIVX.
-        1 => 700000000, // 7 PIVX
-        2 => 600000000, // 6 PIVX
-        3 => 500000000, // 5 PIVX
-        4 => 400000000, // 4 PIVX
-        5 => 300000000, // 3 PIVX
-        6 => 200000000, // 2 PIVX
-        7 => 100000000, // 1 PIVX
+        4 =>  900000000, //  9 PIVX
+        5 =>  800000000, //  8 PIVX
+        6 =>  700000000, //  7 PIVX
+        7 =>  600000000, //  6 PIVX
     ];
 
     public static function init(Database $db): void
