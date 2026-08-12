@@ -37,7 +37,7 @@ const INDEXER_ROCKSDB_PROXY_SOCKET_PATH = 'unix:///run/rr-proxy/pivx-indexer.soc
 const SMT_GENESIS_ROOT = '0000000000000000000000000000000000000000000000000000000000000000';
 // payment processing wallet's birthday: the block before which no service transaction can
 // exist, which is what makes the empty tree above the correct starting state.
-const COIN_GENESIS_BLOCK = 3429124;
+const COIN_GENESIS_BLOCK = 5536811;
 
 
 // Microseconds to sleep after each eth_call. 0 disables it.
