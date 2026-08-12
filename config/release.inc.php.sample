@@ -23,7 +23,7 @@ const RPC_CONFIG = [
 // these seeds.
 const EVM_NETWORK = [
     'chain_id' => 56,
-    'contract_address' => '',
+    'contract_address' => '0x25c7ab6e524a67a9571ac4f02c266658c4e620cb',
     'abi' => __DIR__ . '/../resources/evm-anchor.abi',
 ];
 
