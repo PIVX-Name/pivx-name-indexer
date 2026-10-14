@@ -126,6 +126,12 @@ $out['checkpoints_behind'] = isset($out['last_checkpoint']['smt_root'])
     && $out['anchored_smt_root'] !== null
     && $out['last_checkpoint']['smt_root'] !== $out['anchored_smt_root'];
 
+// The anchor epoch this indexer serves under. The sync loop force-stops when the on-chain
+// epoch moves past EVM_NETWORK['expected_epoch'] (a rules change or rollback the operator
+// has not reviewed), so a running indexer only ever serves state under this epoch. A wallet
+// client pins the epoch it has reviewed and refuses a root served under any other.
+$out['anchored_epoch'] = EVM_NETWORK['expected_epoch'];
+
 $qr = $db->doSelect(
     'domains',
     'COUNT(*) AS `count`',

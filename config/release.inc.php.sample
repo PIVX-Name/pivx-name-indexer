@@ -25,6 +25,11 @@ const EVM_NETWORK = [
     'chain_id' => 56,
     'contract_address' => '0x25c7ab6e524a67a9571ac4f02c266658c4e620cb',
     'abi' => __DIR__ . '/../resources/evm-anchor.abi',
+    // The anchor epoch this release has reviewed and will follow. The contract starts at 1
+    // and bumps it on every rules change or rollback. The indexer force-stops when the
+    // on-chain epoch moves past this value, so only bump it after reviewing what changed
+    // on-chain. See the epoch gate in indexer.php.
+    'expected_epoch' => 1,
 ];
 
 const INDEXER_ROCKSDB_PROXY_SOCKET_PATH = 'unix:///run/rr-proxy/pivx-indexer.sock';

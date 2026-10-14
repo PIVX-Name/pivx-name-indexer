@@ -325,7 +325,8 @@ class Evm
         }
 
         // A chain younger than the fallback depth would otherwise ask for a negative
-        // height; genesis is the honest floor and simply yields an empty rootChain.
+        // height; genesis is the honest floor and simply yields a chain holding only its
+        // genesis checkpoint.
         $block = max($block, 0);
 
         $this->readBlock = '0x' . dechex($block);
@@ -367,109 +368,106 @@ class Evm
     }
 
     /**
-     * Whether `rootChain` has an entry at this index. Out of range reverts.
+     * Number of checkpoints the contract holds: the genesis root at index 0 up to the current
+     * tip, i.e. `tipIndex() + 1`.
+     *
+     * The new contract exposes the tip directly, so this is a single read. The old layout
+     * (a `rootChain` array whose auto-generated getter has no length) forced a revert-probing
+     * doubling+binary search; that cannot work against the new `rootAt`, which is a mapping —
+     * an out-of-range read returns bytes32(0) instead of reverting, so the probe would never
+     * find the end. One `tipIndex` call replaces ~2*log2(n) calls per sync run.
      *
      * @throws Throwable
      */
-    private function rootChainIndexExists(int $index): bool
+    public function getCheckpointCount(): int
     {
-        try {
-            $this->callContract('rootChain', [$index]);
-            return true;
-        } catch (Throwable $e) {
-            // ONLY an actual revert means "past the end". Anything else — a dead
-            // endpoint, a rate limit, a timeout — must propagate.
-            //
-            // Swallowing transport errors here reports an unreachable chain as length 0,
-            // which the caller cannot distinguish from "rolled back past genesis". That
-            // is not a theoretical concern: it deleted a node's entire checkpoint table
-            // during an endpoint outage and left it unable to start.
-            if (self::isRevert($e)) {
-                return false;
-            }
-            throw $e;
+        $tip = $this->callContract('tipIndex')[0] ?? null;
+        if ($tip === null) {
+            // Not a revert — the mapping/accessor never reverts — so an empty result is an
+            // RPC fault, which must surface (and be retried) rather than read as length 0.
+            throw new RuntimeException('eth_call tipIndex returned no value');
         }
+
+        return (int)$tip->toString() + 1;
     }
 
     /**
-     * Whether an RPC error is the contract reverting, as opposed to the endpoint failing.
-     */
-    private static function isRevert(Throwable $e): bool
-    {
-        return stripos($e->getMessage(), 'execution reverted') !== false
-            || stripos($e->getMessage(), 'out of bounds') !== false;
-    }
-
-    /**
-     * Number of roots the contract has ever accepted (`rootChain.length`).
+     * The checkpoint at `$index`: its root and the PIVX height it covers, or null when the
+     * index is not part of the chain — past the tip, or a root a rollback has disavowed.
      *
-     * Solidity's auto-generated array getter exposes no length, so this doubles up to find
-     * an out-of-range index and then binary-searches the boundary: ~2*log2(n) calls, once
-     * per sync run.
+     * `rootAt($index)` gives the root; `verifyRootValidity($root)` gives validity and height
+     * in one call. A rolled-back root reads back invalid, so the caller sees it drop off the
+     * chain exactly as the old `rootHistory.isValid` conveyed it. Neither call can revert
+     * (mapping + plain view), so there is no revert branch to interpret any more.
      *
-     * @throws Throwable
-     */
-    public function getRootChainLength(): int
-    {
-        if (!$this->rootChainIndexExists(0)) {
-            return 0;
-        }
-
-        $lo = 0;
-        $hi = 1;
-        while ($this->rootChainIndexExists($hi)) {
-            $lo = $hi;
-            $hi <<= 1;
-        }
-        while ($lo + 1 < $hi) {
-            $mid = intdiv($lo + $hi, 2);
-            if ($this->rootChainIndexExists($mid)) {
-                $lo = $mid;
-            } else {
-                $hi = $mid;
-            }
-        }
-
-        return $lo + 1;
-    }
-
-    /**
-     * The checkpoint at `rootChain[$index]`: its root and the PIVX height it covers.
-     *
-     * Returns null when the index is past the end, which is how the caller notices the
-     * chain shrank under a rollback.
+     * Phantom-genesis guard: because `rootAt` is a mapping, an index past the tip returns
+     * bytes32(0), and `verifyRootValidity(bytes32(0))` reports a *valid* genesis — so an
+     * out-of-range read would masquerade as a genesis checkpoint. But `commitBatch` rejects
+     * bytes32(0) as a committed root, so the empty root exists on-chain only as genesis at
+     * index 0. Treating a zero root at any other index as "not on the chain" closes the trap
+     * with no extra call. Callers additionally bound iteration by getCheckpointCount().
      *
      * @return array{root: string, block_id: int}|null
      * @throws Throwable
      */
     public function getCheckpointAt(int $index): ?array
     {
-        try {
-            $raw = $this->callContract('rootChain', [$index])[0] ?? null;
-        } catch (Throwable $e) {
-            // Same rule as rootChainIndexExists(): null means "not on the chain", so only
-            // a revert may produce it. An endpoint failure has to surface as an exception.
-            if (self::isRevert($e)) {
-                return null;
-            }
-            throw $e;
-        }
+        $raw = $this->callContract('rootAt', [$index])[0] ?? null;
         if ($raw === null) {
             return null;
         }
+        $root = self::normaliseRoot($raw);
 
-        $info = $this->callContract('rootHistory', [$raw]);
-
-        // A valid entry always carries a height. isValid false would mean a rollback
-        // repudiated it, in which case it is no longer part of the chain and must not be
-        // recorded as a checkpoint.
-        if (($info['isValid'] ?? false) !== true) {
+        // bytes32(0) is genesis, and genesis lives only at index 0. Anywhere else it is an
+        // unwritten slot the chain shrank past under a rollback, never a real checkpoint.
+        // SMT_GENESIS_ROOT is the empty-tree root the contract was deployed with and the same
+        // value indexer.php seeds idx 0 with, so the guard can never drift from the seed.
+        if ($root === SMT_GENESIS_ROOT && $index !== 0) {
             return null;
         }
 
+        $info = $this->callContract('verifyRootValidity', [$raw]);
+
+        // isValid false means a rollback disavowed this root (or it was never on the chain),
+        // so it is not part of the checkpoint chain. A valid entry always carries its height.
+        $isValid = $info['isValid'] ?? ($info[0] ?? false);
+        if ($isValid !== true) {
+            return null;
+        }
+
+        $blockHeight = $info['blockHeight'] ?? ($info[1] ?? null);
+
         return [
-            'root' => self::normaliseRoot($raw),
-            'block_id' => (int)$info['blockHeight']->toString(),
+            'root' => $root,
+            'block_id' => $blockHeight === null ? 0 : (int)$blockHeight->toString(),
+        ];
+    }
+
+    /**
+     * The anchored state in one read: current root, the PIVX height it covers, and the
+     * `epoch` it belongs to.
+     *
+     * `epoch` is the contract's client-safety marker: it advances on any change to the
+     * anchored state other than a proven batch under unchanged rules — a rules change or a
+     * rollback, both of which re-point names without a fresh owner signature. Reading all
+     * three with one `anchoredState()` call guarantees the epoch and the root it guards come
+     * from the same block. The indexer's epoch gate pins the reviewed epoch against this.
+     *
+     * @return array{root: string, block_id: int, epoch: int}
+     * @throws Throwable
+     */
+    public function getAnchoredState(): array
+    {
+        $state = $this->callContract('anchoredState');
+
+        $root = $state['root'] ?? ($state[0] ?? '');
+        $blockHeight = $state['blockHeight'] ?? ($state[1] ?? null);
+        $epoch = $state['currentEpoch'] ?? ($state[2] ?? null);
+
+        return [
+            'root' => self::normaliseRoot($root),
+            'block_id' => $blockHeight === null ? 0 : (int)$blockHeight->toString(),
+            'epoch' => $epoch === null ? 0 : (int)$epoch->toString(),
         ];
     }
 

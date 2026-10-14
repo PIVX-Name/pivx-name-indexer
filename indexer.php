@@ -53,9 +53,9 @@ try {
         if ($db->doInsert(
             'checkpoints',
             [
-                // idx 0 is the contract's rootChain[0] — the genesis root it was deployed
-                // with. Discovery resumes from the highest idx, so this row is the anchor
-                // the whole ascending walk hangs from.
+                // idx 0 is the contract's genesis root (rootAt[0]) — the empty-registry root
+                // it was deployed with. Discovery resumes from the highest idx, so this row is
+                // the anchor the whole ascending walk hangs from.
                 'idx' => 0,
                 'block_id' => COIN_GENESIS_BLOCK,
                 'smt_root' => SMT_GENESIS_ROOT,
@@ -106,7 +106,7 @@ try {
     $evm = new Evm(EVM_NETWORK, $db);
 
     // The newest checkpoint we hold locally. `idx` is the position in the contract's
-    // rootChain array, which is what makes discovery resumable.
+    // root chain (`rootAt` by index, 0 = genesis), which is what makes discovery resumable.
     if (($qr = $db->doSelect(
         'checkpoints',
         ['idx', 'block_id', 'smt_root'],
@@ -138,8 +138,9 @@ try {
 
     // --- CHECKPOINT DISCOVERY ------------------------------------------------------
     //
-    // Checkpoints are read ascending from the anchor contract's rootChain array. The idx
-    // column is the resume cursor, so an interrupted walk continues where it stopped.
+    // Checkpoints are read ascending from the anchor contract's root chain (`rootAt` by
+    // index). The idx column is the resume cursor, so an interrupted walk continues where it
+    // stopped.
     //
     // Best-effort by design: an RPC failure here must not prevent the blockchain sync
     // below from processing the checkpoints already stored. Discovery fills the work
@@ -160,7 +161,29 @@ try {
             'indexer.debug'
         );
 
-        $chainLength = $evm->getRootChainLength();
+        // Epoch gate — the new contract's client-safety marker.
+        //
+        // `epoch` advances whenever the anchored state moves by anything other than a proven
+        // batch under unchanged rules: a rules change, or a rollback. Either re-points names
+        // without a fresh owner signature, so the indexer must pin the epoch it has reviewed
+        // and refuse to follow the chain under a newer one until an operator has looked at
+        // what changed. EVM_NETWORK['expected_epoch'] is that pin; bump it only after
+        // reviewing the change on-chain. Reading it from anchoredState() ties the epoch to the
+        // root it guards (same block). A legitimate rollback trips this first, by design: the
+        // operator reviews, bumps expected_epoch, and on the next run the reconcile below
+        // discards the rolled-back checkpoints and force-stops for a rebuild.
+        $anchored = $evm->getAnchoredState();
+        if ($anchored['epoch'] !== EVM_NETWORK['expected_epoch']) {
+            throw new RuntimeException(
+                'On-chain epoch ' . $anchored['epoch'] . " does not match the reviewed "
+                . "EVM_NETWORK['expected_epoch'] = " . EVM_NETWORK['expected_epoch'] . '. A rules '
+                . 'change or rollback the operator has not reviewed is in force; refusing to '
+                . 'follow the chain until expected_epoch is updated. :FORCE-STOP:',
+                INT_EXC_FATAL
+            );
+        }
+
+        $chainLength = $evm->getCheckpointCount();
         $localNext = $checkpoint['idx'] + 1;
 
         // A rollback rewrites history below our high-water mark: the chain gets shorter,
@@ -247,7 +270,8 @@ try {
             }
         }
     } catch (Throwable $e) {
-        // A rollback or a database failure is a real fault and must surface.
+        // A rollback, an unreviewed epoch change, or a database failure is a real fault and
+        // must surface rather than being swallowed as a best-effort discovery miss.
         if (in_array($e->getCode(), [INT_EXC_FATAL, INT_EXC_DB], true)) {
             throw $e;
         }
