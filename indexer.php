@@ -400,6 +400,7 @@ try {
 
                                 $commandData['tx_id'] = $oneBlockTx['txid'];
                                 $commandData['block_id'] = $block;
+                                $commandData['block_time'] = $blockData['time'];
                                 $newData[] = $commandData;
 
                                 // there can't be more than one command in the same tx
@@ -444,6 +445,8 @@ try {
                             'domain_name' => $oneNewData['domain_name'],
                             'created_block_id' => $oneNewData['block_id'],
                             'updated_block_id' => $oneNewData['block_id'],
+                            'created_ts' => $oneNewData['block_time'],
+                            'updated_ts' => $oneNewData['block_time'],
                             'nonce' => $oneNewData['nonce'],
                         ],
                         true
@@ -462,6 +465,7 @@ try {
                         'domains',
                         [
                             'updated_block_id' => $oneNewData['block_id'],
+                            'updated_ts' => $oneNewData['block_time'],
                             'nonce' => $oneNewData['nonce'],
                         ],
                         ['domain_name' => $oneNewData['domain_name']],
@@ -525,6 +529,7 @@ try {
                 $oneDomainIns = [
                     'domain_name' => $oneNewData['domain_name'],
                     'domain_block_id' => $oneNewData['block_id'],
+                    'domain_ts' => $oneNewData['block_time'],
                     'target_address' => $oneNewData['target_address'],
                     'owner_pubkey' => $oneNewData['pubkey'],
                     'domain_tx' => $oneNewData['tx_id'],

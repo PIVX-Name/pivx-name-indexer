@@ -23,7 +23,7 @@ const RPC_CONFIG = [
 // these seeds.
 const EVM_NETWORK = [
     'chain_id' => 56,
-    'contract_address' => '0x25c7ab6e524a67a9571ac4f02c266658c4e620cb',
+    'contract_address' => '0xe21df741aab28c1916edb1718f18e62c08fab4bc',
     'abi' => __DIR__ . '/../resources/evm-anchor.abi',
     // The anchor epoch this release has reviewed and will follow. The contract starts at 1
     // and bumps it on every rules change or rollback. The indexer force-stops when the
