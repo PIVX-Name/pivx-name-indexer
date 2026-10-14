@@ -5,21 +5,35 @@
             "Application\\": "./registrar/include"
         }
     },
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/alexxiy/web3.php"
+        },
+        {
+            "type": "vcs",
+            "url": "https://github.com/alexxiy/ethereum-util"
+        }
+    ],
     "require": {
         "ext-mysqli": "*",
         "ext-sodium": "*",
         "ext-bcmath": "*",
         "ext-ctype": "*",
-        "guzzlehttp/guzzle": "^7.10",
+        "guzzlehttp/guzzle": "^7.15.2",
         "php-http/guzzle7-adapter": "^1.1",
         "denpa/php-bitcoinrpc": "^2.2",
-        "web3p/web3.php": "^0.3.2",
+        "alexxiy/web3.php": "^0.4.0",
         "bitwasp/bech32": "^0.0.1",
         "irazasyed/telegram-bot-sdk": "^3.16",
-        "web3p/ethereum-tx": "^0.4.3"
+        "web3p/ethereum-tx": "^0.4.3",
+        "web3p/ethereum-util": "^0.1.5"
     },
     "_comments": {
-        "web3p/ethereum-tx": "needed for the registrar"
+        "web3p/ethereum-tx": "needed for the registrar",
+        "alexxiy/web3.php": "maintained fork of the abandoned web3p/web3.php (it 'replaces' that name): phpseclib 4 instead of 2.0, whose every release is blocked by security advisories, plus current react/guzzle versions",
+        "web3p/ethereum-util": "pulled in by web3p/ethereum-tx, which requires this exact name; served from the alexxiy fork (vcs repositories win over Packagist) for the same phpseclib 2.0 -> 4 move. ^0.1.5 makes sure the fork, not upstream 0.1.4, is what resolves",
+        "guzzlehttp/guzzle": "^7.15.2 is the floor clear of security advisories. Guzzle 8 is not an option yet: ratchet/pawl (via web3.php) needs guzzlehttp/psr7 2.x"
     },
 
     "provide": {
