@@ -26,9 +26,11 @@ const EVM_NETWORK = [
     'contract_address' => '0xe21df741aab28c1916edb1718f18e62c08fab4bc',
     'abi' => __DIR__ . '/../resources/evm-anchor.abi',
     // The anchor epoch this release has reviewed and will follow. The contract starts at 1
-    // and bumps it on every rules change or rollback. The indexer force-stops when the
-    // on-chain epoch moves past this value, so only bump it after reviewing what changed
-    // on-chain. See the epoch gate in indexer.php.
+    // and bumps it on every rules change or rollback. The indexer stops following the chain
+    // when the on-chain epoch moves past this value, so only bump it after reviewing what
+    // changed on-chain; it resumes by itself once it carries the new one (and after a
+    // rollback, rebuilds itself from genesis). See the epoch gate in indexer.php. The Docker
+    // image can override it with EXPECTED_EPOCH (resources/docker/configure.php).
     'expected_epoch' => 1,
 ];
 
@@ -61,7 +63,7 @@ const EVM_BATCH_SIZE = {:evm_batch_size:};
 // PIVX network this deployment speaks. MUST match the circuit the prover was built with:
 //   'mainnet' -> plain `cargo prove build`      (addresses ps1…,  marker PiNS:1:)
 //   'testnet' -> `cargo prove build --features testnet` (pts1…, marker tPiNS:1:)
-// Derived from the INCOME_WALLET prefix below (pts1…) when this file was generated.
+// Derived from the INCOME_WALLET prefix below (ps1… here, pts1… on testnet) when this file was generated.
 const COIN_NETWORK = 'mainnet';
 
 const INCOME_WALLET = 'ps1rf97n020fhwycx2nnxfm97ufeyygk9q64h96e5dx304lreg9zl53sas6g3c9gnlfpqw5s4u3zsh';

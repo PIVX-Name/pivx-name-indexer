@@ -35,7 +35,7 @@ A registrar that censors a paid command, invents a transfer, mis-credits, or reo
 
 ## 🚀 Key Features
 
-* **Dual-State Synchronizer**: Parses shielded PIVX transactions (`viewshieldtransaction`) alongside the checkpoints read from the anchor contract's own state, and refuses to advance when the two disagree. Checkpoints come from `eth_call` against `rootChain`, never from event logs — public RPC endpoints refuse `eth_getLogs` outright, and a log stream would still report a rolled-back root as current.
+* **Dual-State Synchronizer**: Parses shielded PIVX transactions (`viewshieldtransaction`) alongside the checkpoints read from the anchor contract's own state, and refuses to advance when the two disagree. Checkpoints come from `eth_call` against the contract's `tipIndex` and `rootAt`, never from event logs — public RPC endpoints refuse `eth_getLogs` outright, and a log stream would still report a rolled-back root as current.
 * **Compact Sparse Merkle Tree**: A 128-level keyspace in which each leaf floats up to the shallowest depth where its key prefix is unique — so a tree holding *n* domains stores roughly *n* nodes, not 128 per key. Backed by RocksDB through the [`rr-proxy`](https://github.com/PIVX-Name/pivx-name-rr-proxy) daemon.
 * **Database Consistency**: MySQL two-phase commit (XA) with automatic crash recovery, so MySQL and RocksDB cannot drift apart after a failed commit.
 * **Domain Resolution APIs**: Forward resolution, reverse resolution, owner lookup, checkpoint registry, per-domain history, and Merkle proofs for any of them.
@@ -67,12 +67,18 @@ PiNS:1:<OP>:<domain>:<args…>:<nonce>:<ed25519-signature>
 On testnet the marker is `tPiNS`, so a signature produced for one network can never be
 replayed on the other.
 
+**One command per transaction.** It is carried by the *first* output paid to the protocol
+address whose memo is a well-formed command — its format and, for every OP but `CHG`, its
+signature. The outputs after it are never looked at, even when that command is then refused
+or underpaid. The registrar decides at ingest, before it knows the domain state the command
+will meet, so this is the only rule it and every indexer can apply alike.
+
 | OP | Meaning | Signed by |
 |:---|:---|:---|
 | `REG` | Register a new domain | registrant |
 | `UPD` | Update the target address | current owner |
 | `CHG` | Transfer the domain to a new owning pubkey | current owner |
-| `LST` | List on the marketplace at a price | owner — this signature *is* the standing offer to sell |
+| `LST` | List on the marketplace at a price, or change the price of a listing | owner — this signature *is* the standing offer to sell |
 | `ULT` | Delist: withdraw a listing, resetting the price to zero | owner |
 | `BUY` | Purchase a listed domain | buyer — the seller's `LST` supplies the other half of the agreement |
 
@@ -85,15 +91,17 @@ Target addresses are Sapling shielded addresses — `ps1…` (78 characters) on 
 Prices are length-tiered (1-character labels cost the most) and defined as protocol constants
 in `include/Protocol.php`; the registrar serves them from its `/v1.0/prices` endpoint.
 
-| Label length | Register (once) | Update address |
+| Label length | Register (`REG`, once) | Any other command (`UPD`, `CHG`, `LST`, `ULT`) |
 |:---|:---|:---|
-| 1 character | 15 PIVX | 7 PIVX |
-| 2 | 12 PIVX | 6 PIVX |
-| 3 | 10 PIVX | 5 PIVX |
-| 4 | 8 PIVX | 4 PIVX |
-| 5 | 6 PIVX | 3 PIVX |
-| 6 | 4 PIVX | 2 PIVX |
-| 7 or more | 2 PIVX | 1 PIVX |
+| 1 character | 10000 PIVX | 15 PIVX |
+| 2 | 7500 PIVX | 12 PIVX |
+| 3 | 2400 PIVX | 10 PIVX |
+| 4 | 700 PIVX | 9 PIVX |
+| 5 | 350 PIVX | 8 PIVX |
+| 6 | 175 PIVX | 7 PIVX |
+| 7 or more | 90 PIVX | 6 PIVX |
+
+A `BUY` pays exactly the listed price instead.
 
 ---
 
@@ -102,7 +110,7 @@ in `include/Protocol.php`; the registrar serves them from its `/v1.0/prices` end
 All endpoints live under `/v1.0/` and answer `{"response": …}` or `{"error":{"error_message": …}}`. `GET` returns defaults; `POST` with a JSON body selects options.
 
 ### `GET /v1.0/info`
-Node status. `POST {"extended": true}` additionally returns the domain count and — importantly — the registrar address and viewing key needed to replicate independently.
+Node status. `POST {"extended": true}` additionally returns the registrar address and viewing key — what anyone needs to replicate independently.
 
 ```json
 {"response":{
@@ -112,13 +120,15 @@ Node status. `POST {"extended": true}` additionally returns the domain count and
   "anchored_smt_root": "b4c9dacf…",
   "indexer_synced": true,
   "checkpoints_behind": false,
+  "anchored_epoch": 1,
+  "sync_stopped": false,
   "domains_count": 0,
-  "registrar_address": "u146xylzx0…",
-  "registrar_viewing_key": "uview…"
+  "registrar_address": "ps1…",
+  "registrar_viewing_key": "pxviews1…"
 }}
 ```
 
-`indexer_synced` is the value to watch: `false` means this node's computed root does not match the last anchored checkpoint — either it is still catching up, or it disagrees with the registrar.
+`indexer_synced` is the value to watch: `false` means this node's computed root does not match the last anchored checkpoint — either it is still catching up, or it disagrees with the registrar. `sync_stopped` is `true` while the node waits for its operator (see [Epoch changes and rollbacks](#epoch-changes-and-rollbacks) below); it keeps serving the state it has, but no longer follows the chain.
 
 ### `GET /v1.0/getRoot`
 The current SMT root as hex. All zeros means the tree is empty.
@@ -129,7 +139,7 @@ Forward resolution, with the Merkle proof for the answer.
 * `GET /v1.0/resolve/reverse/{address}` — every domain pointing at an address.
 * `GET /v1.0/resolve/owner/{pubkey}` — every domain held by an Ed25519 pubkey.
 * `POST {"extended": true}` adds creation/update block IDs and the originating transaction.
-* `POST {"with_checkpoint": true}` returns the anchored checkpoint instead of the live root, so a client can verify the proof against a value that exists on-chain.
+* `POST {"with_checkpoint": true}` adds `checkpoint`, the anchored checkpoint whose root the proof was built against, so a client can verify the proof against a value that exists on-chain. It is `null` while a sync is being committed. `smt_root` is in every answer either way.
 
 Responses carry `merkle_proof`, `proof_depth`, and `proof_terminal`, which are exactly what a client needs to verify inclusion without trusting this server.
 
@@ -197,6 +207,15 @@ php indexer.php clean confirm   # DESTRUCTIVE: truncate all tables, clear RocksD
 ```
 
 `clean` resets the node for a from-scratch resynchronization and requires the literal word `confirm`.
+
+### Epoch changes and rollbacks
+
+The anchor contract's epoch moves on every rules change and every rollback. A node configured for an older one (`EVM_NETWORK['expected_epoch']`) stops following the chain instead of failing — and alerting — on every run: it sends one alert, `/v1.0/info` reports `sync_stopped: true`, and it keeps serving the state it has. Review what changed (the contract's `RulesChanged` and `RootRolledBack` events), then deploy the reviewed `expected_epoch` — a new release, or `EXPECTED_EPOCH` in Docker. The next run resumes by itself:
+
+* **After a rules change** the node simply carries on.
+* **After a rollback** the next run finds checkpoints it synced that the contract no longer attests to. The chain confirmed its state under the older epoch, so this is the rollback that was reviewed: the node empties its tables and its SMT, sends one alert, and resyncs from genesis — what `php indexer.php clean confirm` does by hand. Nothing is lost; it all comes from the chains again.
+
+A checkpoint mismatch under the same epoch the chain confirmed the node's state in cannot be a rollback, since a rollback moves the epoch. It is taken for a bad read and retried from another RPC endpoint. The stop, and the epoch the state was confirmed under, are kept in the `params` table, so they outlive a restart or a recreated container.
 
 ---
 
@@ -312,6 +331,24 @@ Use these standard commands from the directory containing your `docker-compose.y
   ```bash
   curl -i http://localhost:8080/v1.0/info
   ```
+* **Rebuild the node from genesis by hand** (destructive; after a reviewed rollback the node does this by itself — see [Epoch changes and rollbacks](#epoch-changes-and-rollbacks)):
+  ```bash
+  docker exec pivx-name-indexer indexer clean confirm
+  ```
+
+---
+
+### 🔁 Keeping the image up to date
+
+Each release carries the anchor epoch its publisher has reviewed. When the epoch moves — a rules change or a rollback — a node stops following the chain until it runs a release made for the new one, and then carries on by itself (see [Epoch changes and rollbacks](#epoch-changes-and-rollbacks)). Docker does not pull a new `latest` on its own, so without an update step a node stays stopped. A host crontab entry is enough:
+
+```bash
+*/30 * * * * cd /path/to/pivx-name-indexer/resources/docker && docker compose pull -q && docker compose up -d
+```
+
+`docker compose up -d` recreates the container only when the image changed, and the data volumes are kept, so the node resumes where it was.
+
+To follow a rules change or rollback you have reviewed yourself before a release is out, set `EXPECTED_EPOCH` in `.env` to the new epoch and run `docker compose up -d`. Clear it again once you run a release made for that epoch, or later epoch changes will stop the node until you update it by hand.
 
 ---
 

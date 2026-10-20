@@ -31,6 +31,13 @@ try {
     }
 } catch (JsonException $e) {
     apiAnswer('error', API_ERROR_INVALID_INCOMING_JSON);
+} catch (TypeError | ValueError $e) {
+    // A request field of the wrong JSON type - a number or an array where a string belongs - meeting
+    // a typed parameter under strict_types. Uncaught, it was a PHP fatal error in place of the JSON
+    // answer, with a stack trace wherever errors are displayed. Logged as an error all the same,
+    // since a genuine bug surfaces the same way.
+    logEvent($e->getMessage() . ' (' . $e->getFile() . ':' . $e->getLine() . ')', $_SERVER['REQUEST_URI'], 'indexer-api.error');
+    apiAnswer('error', API_ERROR_WRONG_INCOMING_PARAM_VALUE);
 }
 
 apiAnswer('error', API_ERROR_WRONG_API_METHOD);

@@ -37,9 +37,9 @@ class Evm
      *
      * Pinned to one concrete height rather than passing the `finalized` tag on each call,
      * for two reasons. Reading `latest` lets a checkpoint that a reorg later discards be
-     * persisted, and the reconcile path then treats that as a rollback: it deletes rows
-     * and force-stops the node demanding a rebuild, turning an ordinary one-block BSC
-     * reorg into an operator-intervention outage. And a run that resolved the tag per call
+     * persisted, and the reconcile path then treats that as a rollback: once the epoch has
+     * moved it rebuilds the node from genesis, turning an ordinary one-block BSC reorg into
+     * an hours-long resync. And a run that resolved the tag per call
      * would let the length probe and the fetches that follow it straddle different chain
      * tips, so the walk could observe a length it can no longer read to.
      */

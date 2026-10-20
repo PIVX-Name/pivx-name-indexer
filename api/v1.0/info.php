@@ -126,11 +126,16 @@ $out['checkpoints_behind'] = isset($out['last_checkpoint']['smt_root'])
     && $out['anchored_smt_root'] !== null
     && $out['last_checkpoint']['smt_root'] !== $out['anchored_smt_root'];
 
-// The anchor epoch this indexer serves under. The sync loop force-stops when the on-chain
+// The anchor epoch this indexer serves under. The sync loop stops when the on-chain
 // epoch moves past EVM_NETWORK['expected_epoch'] (a rules change or rollback the operator
 // has not reviewed), so a running indexer only ever serves state under this epoch. A wallet
 // client pins the epoch it has reviewed and refuses a root served under any other.
 $out['anchored_epoch'] = EVM_NETWORK['expected_epoch'];
+
+// Whether the sync is stopped, waiting for its operator (see PARAM_SYNC_STOPPED): an on-chain
+// epoch this node has not been updated for, after a rules change or a rollback. Its state stays
+// served meanwhile, but it no longer follows the chain.
+$out['sync_stopped'] = syncStopped($db);
 
 $qr = $db->doSelect(
     'domains',

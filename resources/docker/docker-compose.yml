@@ -28,6 +28,9 @@ services:
       - EVM_THROTTLING=${EVM_THROTTLING:-0}
       # Checkpoints persisted per transaction; bounds work lost to an interrupted sync.
       - EVM_BATCH_SIZE=${EVM_BATCH_SIZE:-10}
+      # Anchor epoch to follow. Empty = the one this image was released for; set it only to
+      # follow a rules change or rollback you have reviewed yourself before a new image.
+      - EXPECTED_EPOCH=${EXPECTED_EPOCH:-}
       - NOTIFY_TYPE=${NOTIFY_TYPE:-}
       - NOTIFY_TG_BOT_KEY=${NOTIFY_TG_BOT_KEY:-}
       - NOTIFY_TG_USER_ID=${NOTIFY_TG_USER_ID:-}

@@ -43,7 +43,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if (isset($input['with_checkpoint']) && $input['with_checkpoint'] === true) {
-        $request['with_checkpoint'] = $input['with_checkpoint'];
+        $request['with_checkpoint'] = true;
     }
 
     if ($request['extended'] === true || $request['with_checkpoint'] === true) {
@@ -103,14 +103,12 @@ foreach ($dbData as $oneDomain) {
         // Pack the bytes back into a string, then convert to hex
         $hexProof[] = bin2hex(pack('C*', ...$siblingBytes));
     }
-    // Get the current root
-    if (!isset($input['with_checkpoint']) || $input['with_checkpoint'] === false) {
-        $out[$index] += [
-            'smt_root' => bin2hex(pack('C*', ...$smtState['root'])),
-        ];
-    }
-
+    // The root the proof was built against, in every answer. It used to be left out whenever
+    // `with_checkpoint` was asked for, on the grounds that the checkpoint carries it - but the
+    // checkpoint can be null (see below), and the test for it read the raw input while the one
+    // below read $request, so `"with_checkpoint": 1` returned neither.
     $out[$index] += [
+        'smt_root' => bin2hex(pack('C*', ...$smtState['root'])),
         'merkle_proof' => $hexProof,
         'proof_depth' => $smtState['proof']['depth'],
         // "Occupied" or "Vacant", or {"Blocked":{"record":{…}}} when another domain
@@ -119,11 +117,16 @@ foreach ($dbData as $oneDomain) {
     ];
 
     if ($request['with_checkpoint']) {
+        // The checkpoint whose root this proof was built against. Not simply the newest one:
+        // discovery stores checkpoints before the sync replays them, so the newest can lie
+        // ahead of the tree, and a proof checked against its root fails. The tree only ever
+        // stops on an anchored root, so a matching checkpoint exists whenever it is at rest;
+        // null means a sync is committing right now and the request is worth repeating.
         $qr = $db->doSelect(
             'checkpoints',
             ['idx', 'block_id', 'smt_root'],
-            ['block_id' => ['sign' => '>=', 'value' => $oneDomain['updated_block_id']]],
-            'ORDER BY `block_id` DESC LIMIT 1',
+            ['smt_root' => bin2hex(pack('C*', ...$smtState['root']))],
+            'ORDER BY `idx` DESC LIMIT 1',
         );
         if ($qr === false) {
             throw new RuntimeException(API_ERROR_INTERNAL, INT_EXC_DB);

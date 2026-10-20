@@ -30,6 +30,31 @@ $replacements = [
 
 $content = strtr($template, $replacements);
 
+// EXPECTED_EPOCH overrides the anchor epoch this image was released for
+// (EVM_NETWORK['expected_epoch'] in the template): for an operator who reviews rules changes
+// and rollbacks themselves, and follows one before an image carrying it is published. Left
+// empty, the node follows the image's own reviewed value, which a new release moves forward.
+// Not `?: ''` like the values above: "0" would read as unset there, and is an error here.
+$expectedEpoch = getenv('EXPECTED_EPOCH');
+if ($expectedEpoch !== false && $expectedEpoch !== '') {
+    // Digits only, so nothing but a number can land in the generated PHP.
+    if (!ctype_digit($expectedEpoch) || (int)$expectedEpoch < 1) {
+        echo "Error: EXPECTED_EPOCH must be a positive integer, got \"$expectedEpoch\"\n";
+        exit(1);
+    }
+    $content = preg_replace(
+        "/'expected_epoch' => \\d+,/",
+        "'expected_epoch' => " . (int)$expectedEpoch . ',',
+        $content,
+        -1,
+        $count
+    );
+    if ($count !== 1) {
+        echo "Error: expected_epoch not found exactly once in $templatePath\n";
+        exit(1);
+    }
+}
+
 if (file_put_contents($outputPath, $content) === false) {
     echo "Error: Failed to write config to $outputPath\n";
     exit(1);

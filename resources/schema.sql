@@ -3,7 +3,7 @@
 --
 
 DROP TABLE IF EXISTS `checkpoints`;
--- `idx` is the position in the anchor contract's `rootChain` array: the resume cursor for
+-- `idx` is the position of the root in the anchor contract (its `rootAt` index): the resume cursor for
 -- checkpoint discovery, and what makes a rollback detectable (an index can later hold a
 -- different root).
 --

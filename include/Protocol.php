@@ -100,8 +100,8 @@ class Protocol
 
     public const array PRICES_REG = [
         // Denominated in SATOSHI, matching the units the indexer compares against:
-        // pivxd reports a shielded output's value as a decimal PIVX string, which
-        // convertAmount() scales by 1e8 before paymentAmountValid() checks it.
+        // commandOutput() takes a shielded output's amount from pivxd's `valueSat`,
+        // already in satoshi, before paymentAmountValid() checks it.
         1 => 1000000000000, // 10000 PIVX
         2 =>  750000000000, //  7500 PIVX
         3 =>  240000000000, //  2400 PIVX
@@ -256,6 +256,52 @@ class Protocol
         }
 
         return $out;
+    }
+
+    /**
+     * The output carrying a transaction's command, or null when it carries none.
+     *
+     * One command per transaction: the FIRST output paid to INCOME_WALLET whose memo passes
+     * parseCommand's pre-check - its format and, for every OP but CHG, its signature, nothing
+     * that depends on domain state. The outputs after it are never looked at, even when this
+     * one is then refused by the full check or underpaid; the transaction simply carries no
+     * valid command.
+     *
+     * The registrar and the indexer must pick the same output, or their trees diverge. Both
+     * see the outputs in the same order (viewshieldtransaction lists them by output index),
+     * but they judge them at different moments: the registrar at ingest, before the domain
+     * state the command will meet is known, the indexer against that state. A rule that
+     * skipped an output the full check refuses would therefore pick a different output on
+     * each side - the indexer would apply a second command the registrar never queued, and
+     * the two roots would part for good. The state-free pre-check is what both can agree on.
+     *
+     * @param array $outputs viewshieldtransaction's `outputs`, in the order it returns them
+     * @param int $blockTime the time of the block carrying the transaction
+     * @return array{output: int, memo: string, amount: int, command: array}|null
+     * @throws RuntimeException
+     */
+    public static function commandOutput(array $outputs, int $blockTime): ?array
+    {
+        foreach ($outputs as $oneOutput) {
+            // valueSat, the integer satoshi amount, not `value`: that one is a JSON float, and PHP
+            // spells a float below 0.0001 as "1.0E-5", which bcmul() refuses with a ValueError.
+            // One satoshi sent here with any text memo halted the registrar and every indexer on
+            // that block for good.
+            if ($oneOutput['address'] !== INCOME_WALLET || !isset($oneOutput['memoStr']) ||
+                ($amount = $oneOutput['valueSat']) <= 0) {
+                continue;
+            }
+            if (($command = self::parseCommand($oneOutput['memoStr'], $amount, $blockTime, true)) !== []) {
+                return [
+                    'output' => $oneOutput['output'],
+                    'memo' => $oneOutput['memoStr'],
+                    'amount' => $amount,
+                    'command' => $command,
+                ];
+            }
+        }
+
+        return null;
     }
 
     /**
