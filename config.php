@@ -99,6 +99,12 @@ const PARAM_SYNC_STOPPED = 'sync_stopped';
 // expected_epoch, it is the rollback they reviewed, and the node rebuilds itself (see the
 // reconcile in indexer.php).
 const PARAM_STATE_EPOCH = 'state_epoch';
+// Present while the node waits for the epoch it was updated for: deployed before that change
+// came into force, it finds the on-chain epoch below expected_epoch, and waits instead of
+// stopping (see the epoch gate in indexer.php). Stored as the expected_epoch it waits for, so the
+// operator is told once rather than on every run, and removed by the first run that finds the
+// chain at that epoch.
+const PARAM_EPOCH_WAIT = 'epoch_wait';
 
 // API Errors
 const API_ERROR_INTERNAL = 'Internal Error';

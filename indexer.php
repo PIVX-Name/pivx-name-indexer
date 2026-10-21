@@ -116,9 +116,12 @@ try {
             INT_EXC_FATAL
         );
     }
+    $epochParams = getParams([PARAM_STATE_EPOCH, PARAM_EPOCH_WAIT], $db);
     // The epoch the chain last confirmed this state under; null on a node that predates it,
     // until its next run confirms one (see PARAM_STATE_EPOCH).
-    $stateEpoch = getParams([PARAM_STATE_EPOCH], $db)[PARAM_STATE_EPOCH] ?? null;
+    $stateEpoch = $epochParams[PARAM_STATE_EPOCH] ?? null;
+    // The expected_epoch this node has already reported waiting for (see PARAM_EPOCH_WAIT).
+    $epochWait = $epochParams[PARAM_EPOCH_WAIT] ?? null;
 
     // --- CHECKPOINT DISCOVERY ------------------------------------------------------
     //
@@ -160,7 +163,28 @@ try {
         // The stop this raises holds until expected_epoch is changed (see PARAM_SYNC_STOPPED),
         // so the operator is told once rather than on every run, and nothing more is needed
         // than deploying the reviewed value.
+        //
+        // Below the reviewed epoch, the change this node was updated for is not in force yet.
+        // The epoch never goes down, so that is a change still to come, not one nobody has
+        // reviewed: the node waits for it instead of stopping, since a stop would outlast it -
+        // only a new expected_epoch lifts one. Meanwhile it takes no new checkpoints, so the
+        // state epoch below is confirmed only under the epoch it was reviewed for, and from the
+        // first run that finds the chain at that epoch it carries on by itself. The wait is
+        // reported once (see PARAM_EPOCH_WAIT); later runs end discovery quietly, and the
+        // checkpoints already stored still sync.
         $anchored = $evm->getAnchoredState();
+        if ($anchored['epoch'] < EVM_NETWORK['expected_epoch']) {
+            $waitMessage = 'On-chain epoch ' . $anchored['epoch'] . ' is below the reviewed '
+                . "EVM_NETWORK['expected_epoch'] = " . EVM_NETWORK['expected_epoch'] . ': the '
+                . 'change it was reviewed for is not in force yet. Waiting for it; the sync '
+                . 'carries on by itself once the chain reaches epoch '
+                . EVM_NETWORK['expected_epoch'] . '.';
+            if ($epochWait === EVM_NETWORK['expected_epoch']) {
+                throw new RuntimeException($waitMessage);
+            }
+            setParams([PARAM_EPOCH_WAIT => EVM_NETWORK['expected_epoch']], $db);
+            throw new RuntimeException($waitMessage, INT_EXC_FATAL);
+        }
         if ($anchored['epoch'] !== EVM_NETWORK['expected_epoch']) {
             throw new RuntimeException(
                 'On-chain epoch ' . $anchored['epoch'] . " does not match the reviewed "
@@ -169,6 +193,9 @@ try {
                 . 'follow the chain until expected_epoch is updated. :EPOCH-STOP:',
                 INT_EXC_FATAL
             );
+        }
+        if ($epochWait !== null && $db->doDelete('params', ['param' => PARAM_EPOCH_WAIT]) === false) {
+            throw new RuntimeException('Failed to clear the epoch wait', INT_EXC_DB);
         }
 
         $chainLength = $evm->getCheckpointCount();

@@ -120,7 +120,7 @@ Node status. `POST {"extended": true}` additionally returns the registrar addres
   "anchored_smt_root": "b4c9dacf…",
   "indexer_synced": true,
   "checkpoints_behind": false,
-  "anchored_epoch": 1,
+  "anchored_epoch": 2,
   "sync_stopped": false,
   "domains_count": 0,
   "registrar_address": "ps1…",
@@ -215,7 +215,9 @@ The anchor contract's epoch moves on every rules change and every rollback. A no
 * **After a rules change** the node simply carries on.
 * **After a rollback** the next run finds checkpoints it synced that the contract no longer attests to. The chain confirmed its state under the older epoch, so this is the rollback that was reviewed: the node empties its tables and its SMT, sends one alert, and resyncs from genesis — what `php indexer.php clean confirm` does by hand. Nothing is lost; it all comes from the chains again.
 
-A checkpoint mismatch under the same epoch the chain confirmed the node's state in cannot be a rollback, since a rollback moves the epoch. It is taken for a bad read and retried from another RPC endpoint. The stop, and the epoch the state was confirmed under, are kept in the `params` table, so they outlive a restart or a recreated container.
+A node updated before the change it was made for comes into force finds the chain at an older epoch than its own. That change is still to come, so the node waits for it instead of stopping: it sends one alert, takes no new checkpoints (so `indexer_synced` turns `false` once the chain anchors a newer one), and carries on by itself once the chain reaches its epoch.
+
+A checkpoint mismatch under the same epoch the chain confirmed the node's state in cannot be a rollback, since a rollback moves the epoch. It is taken for a bad read and retried from another RPC endpoint. The stop, the wait, and the epoch the state was confirmed under are kept in the `params` table, so they outlive a restart or a recreated container.
 
 ---
 
@@ -348,7 +350,7 @@ Each release carries the anchor epoch its publisher has reviewed. When the epoch
 
 `docker compose up -d` recreates the container only when the image changed, and the data volumes are kept, so the node resumes where it was.
 
-To follow a rules change or rollback you have reviewed yourself before a release is out, set `EXPECTED_EPOCH` in `.env` to the new epoch and run `docker compose up -d`. Clear it again once you run a release made for that epoch, or later epoch changes will stop the node until you update it by hand.
+To follow a rules change or rollback you have reviewed yourself before a release is out, set `EXPECTED_EPOCH` in `.env` to the new epoch and run `docker compose up -d`. Set before the change comes into force, the node waits for it. Clear it again once you run a release made for that epoch, or later epoch changes will stop the node until you update it by hand.
 
 ---
 

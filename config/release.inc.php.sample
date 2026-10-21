@@ -29,9 +29,10 @@ const EVM_NETWORK = [
     // and bumps it on every rules change or rollback. The indexer stops following the chain
     // when the on-chain epoch moves past this value, so only bump it after reviewing what
     // changed on-chain; it resumes by itself once it carries the new one (and after a
-    // rollback, rebuilds itself from genesis). See the epoch gate in indexer.php. The Docker
-    // image can override it with EXPECTED_EPOCH (resources/docker/configure.php).
-    'expected_epoch' => 1,
+    // rollback, rebuilds itself from genesis). Bumped before that change comes into force, it
+    // waits for it instead. See the epoch gate in indexer.php. The Docker image can override it
+    // with EXPECTED_EPOCH (resources/docker/configure.php).
+    'expected_epoch' => 2,
 ];
 
 const INDEXER_ROCKSDB_PROXY_SOCKET_PATH = 'unix:///run/rr-proxy/pivx-indexer.sock';
