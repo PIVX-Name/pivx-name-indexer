@@ -160,14 +160,14 @@ try {
         // operator reviews, bumps expected_epoch, and on the next run the reconcile below
         // finds the rolled-back checkpoints and rebuilds the node from genesis.
         //
-        // The stop this raises holds until expected_epoch is changed (see PARAM_SYNC_STOPPED),
-        // so the operator is told once rather than on every run, and nothing more is needed
-        // than deploying the reviewed value.
+        // The stop this raises holds until expected_epoch reaches the on-chain epoch (see
+        // PARAM_SYNC_STOPPED), so the operator is told once rather than on every run, and
+        // nothing more is needed than deploying the reviewed value.
         //
         // Below the reviewed epoch, the change this node was updated for is not in force yet.
         // The epoch never goes down, so that is a change still to come, not one nobody has
-        // reviewed: the node waits for it instead of stopping, since a stop would outlast it -
-        // only a new expected_epoch lifts one. Meanwhile it takes no new checkpoints, so the
+        // reviewed: the node waits for it instead of stopping, since a stop is for an on-chain
+        // epoch past the reviewed one. Meanwhile it takes no new checkpoints, so the
         // state epoch below is confirmed only under the epoch it was reviewed for, and from the
         // first run that finds the chain at that epoch it carries on by itself. The wait is
         // reported once (see PARAM_EPOCH_WAIT); later runs end discovery quietly, and the
@@ -656,12 +656,14 @@ try {
     );
 
     // Hold the sync where it stopped instead of failing - and alerting - on every run. The
-    // marker comes from the checkpoint discovery above, by which point $db exists.
+    // marker comes from the checkpoint discovery above, by which point $db exists and $anchored
+    // holds the on-chain epoch that raised it.
     $stopNote = '';
     if ($e->getCode() === INT_EXC_FATAL && str_contains($e->getMessage(), ':EPOCH-STOP:')) {
         try {
-            setParams([PARAM_SYNC_STOPPED => EVM_NETWORK['expected_epoch']], $db);
-            $stopNote = ' The sync is stopped until expected_epoch is changed.';
+            setParams([PARAM_SYNC_STOPPED => $anchored['epoch']], $db);
+            $stopNote = ' The sync is stopped until expected_epoch is raised to '
+                . $anchored['epoch'] . '.';
         } catch (Throwable $stopError) {
             logEvent($stopError->getMessage(), 'Stopping the sync failed', 'indexer.error');
             $stopNote = ' Stopping the sync failed, so this repeats on every run.';

@@ -93,9 +93,10 @@ function setParams(array $params, Database $db): void
 /**
  * Whether the sync is held by a stop (see PARAM_SYNC_STOPPED).
  *
- * The stop no longer holds once EVM_NETWORK['expected_epoch'] differs from the one it was made
- * under: the next run checks the new value against the chain, and stops again if it is still
- * not the on-chain epoch. With $lift, such a stop is also removed.
+ * The stop no longer holds once EVM_NETWORK['expected_epoch'] reaches the on-chain epoch it was
+ * made at: the next run checks the new value against the chain, and stops again if it is still
+ * not the on-chain epoch. Until then the epoch, which never goes down, is still past the reviewed
+ * one, so holding needs no chain read. With $lift, such a stop is also removed.
  *
  * @param Database $db
  * @param bool $lift
@@ -108,7 +109,7 @@ function syncStopped(Database $db, bool $lift = false): bool
     if ($stop === null) {
         return false;
     }
-    if ($stop === EVM_NETWORK['expected_epoch']) {
+    if ($stop > EVM_NETWORK['expected_epoch']) {
         return true;
     }
     if ($lift && $db->doDelete('params', ['param' => PARAM_SYNC_STOPPED]) === false) {
