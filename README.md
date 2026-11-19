@@ -162,7 +162,7 @@ Sample requests for every endpoint are kept as `.http` files in [`api/dev/`](api
 
 * **PHP**: 8.5 (pinned in the Docker image and used in production) with `mysqli`, `sodium`, `bcmath` and `ctype`.
   `sodium` is compiled into the PHP 8.5 binary on Debian/Sury, so there is no separate `php8.5-sodium` package to install.
-* **Database**: **MySQL 8.0+** (8.4 LTS in the Docker image), with the `XA_RECOVER_ADMIN` privilege — the indexer inspects and resolves prepared XA transactions on startup.
+* **Database**: **MySQL 8.0+** (9.7 LTS in the Docker image), with the `XA_RECOVER_ADMIN` privilege — the indexer inspects and resolves prepared XA transactions on startup.
   **MariaDB will not work.** The schema uses the `utf8mb4_0900_ai_ci` collation, which MariaDB does not implement, and `XA_RECOVER_ADMIN` is a MySQL privilege with no MariaDB equivalent. This is a hard incompatibility, not a preference.
 * **Key-Value Store**: RocksDB accessed via the [**rr-proxy**](https://github.com/PIVX-Name/pivx-name-rr-proxy) socket daemon, which owns the compact SMT implementation.
 * **Nodes**:
@@ -231,7 +231,7 @@ A checkpoint mismatch under the same epoch the chain confirmed the node's state 
 
 The indexer can be deployed easily as a Docker container. There are two ways to spin up the container: **from the GitHub Container Registry (GHCR) image** (recommended for production) or **built from local source files**.
 
-A single self-contained image: MySQL 8.4, the `rr-proxy` SMT daemon, PHP-FPM 8.5, nginx
+A single self-contained image: MySQL 9.7, the `rr-proxy` SMT daemon, PHP-FPM 8.5, nginx
 and cron. That is deliberately not one-process-per-container — the value of an independent
 indexer comes from how many people actually run one, and a single `docker compose up`
 reaches far more of them than a multi-service topology would.
@@ -244,7 +244,7 @@ restart rather than a silent outage.
 | Component | Version |
 |:---|:---|
 | Base | Debian 13 (trixie) slim |
-| MySQL | 8.4 LTS |
+| MySQL | 9.7 LTS |
 | PHP | 8.5 (FPM + CLI) |
 | nginx | 1.30 stable (pinned; Debian trixie ships 1.26) |
 | Scheduler | cron (no init system in the image) |

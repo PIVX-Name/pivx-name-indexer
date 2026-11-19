@@ -122,7 +122,10 @@ RUN set -eux; \
     curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2025 -o /tmp/mysql.asc; \
     checkkey /tmp/mysql.asc BCA43417C3B485DD128EC6D4B7B3B788A8D3785C; \
     gpg --dearmor -o /usr/share/keyrings/mysql.gpg /tmp/mysql.asc; \
-    echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] https://repo.mysql.com/apt/debian/ trixie mysql-8.4-lts" \
+    # The 9.7 LTS line (8.4 LTS up to v1.2.0). A data directory made by 8.4 is upgraded in
+    # place on the first start under 9.7, and 8.4 cannot open it after that: going back to an
+    # older image means a new mysql_data volume and a sync from scratch.
+    echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] https://repo.mysql.com/apt/debian/ trixie mysql-9.7-lts" \
         > /etc/apt/sources.list.d/mysql.list; \
     \
     # Three keys in one file: the current one and the two nginx.org names for its next ones.
