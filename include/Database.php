@@ -382,28 +382,26 @@ class Database
             return false;
         }
 
-        $q = 'INSERT ' . ($ignore ? 'IGNORE ' : '') . 'INTO ' . $dbTable . ' (';
-        $v = 'VALUES (';
-
-        foreach ($data as $key => $value) {
-            $q .= '`' . $key . '`,';
-            $v .= $this->getQueryValue($value, ',');
+        // Each list is collected and joined once: cutting a trailing comma off the growing string
+        // with mb_substr() scanned all of it again each time.
+        $q = 'INSERT ' . ($ignore ? 'IGNORE ' : '') . 'INTO ' . $dbTable . ' (`' . implode('`,`', array_keys($data)) . '`) ';
+        $values = [];
+        foreach ($data as $value) {
+            $values[] = $this->getQueryValue($value);
         }
-
-        $q = mb_substr($q, 0, -1) . ') ';
-        $v = mb_substr($v, 0, -1) . ') ';
+        $v = 'VALUES (' . implode(',', $values) . ') ';
 
         if ($dup !== []) {
-            $v .= 'AS `sysdbins` ON DUPLICATE KEY UPDATE ';
+            $updates = [];
             foreach ($dup as $val) {
-                $v .= $dbTable . '.`' . $val . '` = `sysdbins`.`' . $val . '`,';
+                $updates[] = $dbTable . '.`' . $val . '` = `sysdbins`.`' . $val . '`';
             }
 
             if ($extra !== '') {
-                $v .= $extra . ',';
+                $updates[] = $extra;
             }
 
-            $v = mb_substr($v, 0, -1);
+            $v .= 'AS `sysdbins` ON DUPLICATE KEY UPDATE ' . implode(',', $updates);
         } elseif ($extra !== '') {
             $v .= 'AS `sysdbins` ON DUPLICATE KEY UPDATE ' . $extra;
         }
@@ -418,25 +416,28 @@ class Database
         }
 
         $q = 'INSERT ' . ($ignore ? 'IGNORE ':'') . 'INTO ' . $dbTable . ' (`' . implode('`,`', array_keys(current($data))) . '`) ';
-        $v = 'VALUES ';
 
+        // The rows are collected and joined once: cutting a trailing comma off the growing VALUES
+        // with mb_substr() after each row scanned all of it again, so a bulk insert of n rows (the
+        // history of a full sync) took time in n². It also turned each invalid UTF-8 byte of the
+        // statement into '?'; values now go as given, escaped (none of the callers' is binary).
+        $rows = [];
         foreach ($data as $oneInsert) {
-            $v .= '(';
+            $values = [];
             foreach ($oneInsert as $value) {
-                $v .= $this->getQueryValue($value, ',');
+                $values[] = $this->getQueryValue($value);
             }
-            $v = mb_substr($v, 0, -1);
-            $v .= '),';
+            $rows[] = '(' . implode(',', $values) . ')';
         }
-        $v = mb_substr($v, 0, -1);
+        $v = 'VALUES ' . implode(',', $rows);
 
         if ($dup !== []) {
-            $v .= ' AS `sysdbins` ON DUPLICATE KEY UPDATE ';
+            $updates = [];
             foreach ($dup as $val) {
-                $v .= '`' . $dbTable . '`.`' . $val . '` = `sysdbins`.`' . $val . '`,';
+                $updates[] = '`' . $dbTable . '`.`' . $val . '` = `sysdbins`.`' . $val . '`';
             }
 
-            $v = mb_substr($v, 0, -1);
+            $v .= ' AS `sysdbins` ON DUPLICATE KEY UPDATE ' . implode(',', $updates);
         } elseif ($extra !== '') {
             $v .= ' AS `sysdbins` ON DUPLICATE KEY UPDATE ' . $extra;
         }
@@ -493,9 +494,10 @@ class Database
             return false;
         }
 
-        foreach ($map as $key => $value) {
-            $q = str_replace($key, $this->getQueryValue($value), $q);
-        }
+        // One pass: a value put in is never searched again, so a value holding the name of another
+        // placeholder stays as it is. Replaced one by one, it got that placeholder's value inside
+        // its own quotes.
+        $q = strtr($q, array_map(fn($value) => $this->getQueryValue($value), $map));
 
         return $this->query($q, false);
     }

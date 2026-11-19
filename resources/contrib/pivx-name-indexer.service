@@ -1,7 +1,11 @@
 # Adjust paths and user permissions according to your deployment.
 [Unit]
 Description=PIVX Name Indexer Sync Service
-After=network.target mariadb.service mysql.service rr-proxy-indexer.service
+# MySQL (mysqld.service on Fedora/RHEL, mysql.service on Debian/Ubuntu; MariaDB cannot load the
+# schema), and the indexer's rr-proxy: the instance rr-proxy@pivx-indexer of rr-proxy's
+# contrib/rr-proxy@.service, or a single rr-proxy.service. A unit named here that does not exist
+# is ignored.
+After=network.target mysqld.service mysql.service rr-proxy@pivx-indexer.service rr-proxy.service
 
 # Started ONLY by pivx-name-indexer.timer.
 #

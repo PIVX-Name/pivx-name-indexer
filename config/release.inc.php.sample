@@ -58,7 +58,8 @@ const EVM_THROTTLING = {:evm_throttling:};
 
 // Checkpoints fetched and persisted per database transaction. Bounds how much
 // work is lost if an endpoint dies mid-run: at most one chunk, since the ascending
-// walk resumes from the highest stored index.
+// walk resumes from the highest stored index. Each chunk is read in two JSON-RPC
+// batch requests (one at a time from an endpoint that does not answer batches).
 const EVM_BATCH_SIZE = {:evm_batch_size:};
 
 // PIVX network this deployment speaks. MUST match the circuit the prover was built with:
@@ -76,3 +77,8 @@ const NOTIFY_TG_BOT_KEY = '{:notify_tg_bot_key:}';
 const NOTIFY_TG_USER_ID = '{:notify_tg_user_id:}';
 
 const WORKLOGS_PATH = '{:logs_path:}';
+
+// The debug logs (*.debug.log in WORKLOGS_PATH) beside the error logs: the run-by-run record of
+// endpoint rotations, node lag, roots validated, payouts sent and alerts held back. false writes
+// the error logs only. Rotated with the others by the logrotate config.
+const DEBUG = {:debug:};
