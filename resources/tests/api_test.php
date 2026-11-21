@@ -8,8 +8,10 @@
 // given only when the two are of one state - the proofs' root is the root of the checkpoint the
 // rows were committed at. The sync commits the tree first and MySQL right after, so the tree ahead
 // of MySQL is what a lookup landing between the two commits sees; here it is held there, then
-// MySQL catches up. /v1.0/info: the anchored root it caches is written whole. /v1.0/checkpoints
-// and /v1.0/history: a block height is an integer or a string of digits, nothing else.
+// MySQL catches up. /v1.0/info: the anchored root it caches is written whole. The method is that
+// of the path as nginx matched it. /v1.0/checkpoints and /v1.0/history: a block height is an
+// integer or a string of digits, nothing else. The API connects as a user that may only read
+// (DB_CONFIG_API).
 
 require __DIR__ . '/bootstrap.php';
 
@@ -21,6 +23,10 @@ const ANCHOR_PORT = 18614;
 $tmp = getenv('TEST_TMP');
 $logs = $tmp . '/resolve-logs';
 $idx = indexerCopy($tmp . '/resolve', getenv('RR_SOCKET'), $logs, 2);
+// The API reads with a user of its own that may only read (DB_CONFIG_API; run.sh's tro), as a
+// deployment can have it: every answer below comes through it.
+file_put_contents($idx . '/config/test.inc.php', 'const DB_CONFIG_API = ' .
+    var_export(['user' => 'tro', 'pass' => 'tro'] + DB_CONFIG, true) . ";\n", FILE_APPEND);
 $daemon = startRrProxy();
 $api = spawn(['php', '-S', '127.0.0.1:' . API_PORT, $idx . '/api.php'], [], $logs . '/php-s.out');
 @mkdir($tmp . '/fanchor-api');
@@ -124,6 +130,13 @@ try {
     check(@file_get_contents($cache) === hash('sha256', 'root1') && glob($cache . '.*') === [],
         'cached whole, nothing left beside it');
 
+    section('the method: of the path as nginx matches it to a location');
+    [$r] = $call('//v9/v1.0/info');
+    check(($r['error']['error_message'] ?? '') === 'Wrong API method',
+        '//v9/v1.0/info, which nginx serves as /v9/v1.0/info: none (parse_url() read host v9, path /v1.0/info)');
+    [$r] = $call('/v1.0/info?x=1');
+    check(isset($r['response']['anchored_smt_root']), 'the path before a query: /v1.0/info');
+
     section('/v1.0/checkpoints and /v1.0/history: a block height');
     $wrong = 'One or several params provided have wrong value';
     foreach (['12abc', [1], -1, 1.5, true, '99999999999999999999', ' 100'] as $bad) {
@@ -142,6 +155,25 @@ try {
     [$h] = $call('/v1.0/history/alice.pivx', ['from_block_id' => null]);
     check(array_column($r['response'] ?? [], 'block_id') === [1, 100, 200] &&
         array_column($h['response'] ?? [], 'domain_block_id') === [200, 100], '0 and null: from the start');
+
+    section('the API\'s database user (DB_CONFIG_API)');
+    try {
+        (new mysqli($dbHost, 'tro', 'tro', DB_CONFIG['db_name'], (int)$dbPort))
+            ->query("UPDATE params SET value = value WHERE param = 'last_processed_coin_block'");
+        check(false, 'tro may only read');
+    } catch (mysqli_sql_exception $e) {
+        check(str_contains($e->getMessage(), 'denied'), 'tro may only read: ' . $e->getMessage());
+    }
+    // Every answer above came through tro. With its password wrong, the API has no database: it
+    // connects as that user, not as DB_CONFIG's.
+    $conf = $idx . '/config/test.inc.php';
+    $confText = file_get_contents($conf);
+    file_put_contents($conf, str_replace("'pass' => 'tro'", "'pass' => 'wrong'", $confText));
+    [$r] = $call('/v1.0/checkpoints', ['from_block' => 0, 'order' => 'asc']);
+    check(!isset($r['response']), 'its password wrong: no rows (' . json_encode($r) . ')');
+    file_put_contents($conf, $confText);
+    [$r] = $call('/v1.0/checkpoints', ['from_block' => 0, 'order' => 'asc']);
+    check(array_column($r['response'] ?? [], 'block_id') === [1, 100, 200], 'right again: the rows');
 
     section('a commit landing while lookups run');
     // Lookups in a loop while the tree and MySQL move on, the tree first: every answer is of one

@@ -50,9 +50,10 @@ CREATE TABLE `domains` (
 --
 
 DROP TABLE IF EXISTS `domains_history`;
--- `domain_block_id` is a key of its own for the reads by block range (the payout agent's TipIndex).
--- Nodes created before the key get it from the Docker entrypoint, or by hand:
--- ALTER TABLE `domains_history` ADD KEY `domain_block_id` (`domain_block_id`);
+-- 1.3.0 gave `domain_block_id` a key of its own, for reads by block range that nothing makes: every
+-- read goes by name, which the primary key serves. A node that has it gets it dropped by the Docker
+-- entrypoint, or by hand:
+-- ALTER TABLE `domains_history` DROP KEY `domain_block_id`;
 CREATE TABLE `domains_history` (
   `domain_name` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `domain_block_id` int unsigned NOT NULL,
@@ -65,8 +66,7 @@ CREATE TABLE `domains_history` (
   `price` bigint unsigned NOT NULL,
   PRIMARY KEY (`domain_name`,`domain_block_id`,`nonce`) USING BTREE,
   KEY `target_address` (`target_address`) USING BTREE,
-  KEY `owner_pubkey` (`owner_pubkey`),
-  KEY `domain_block_id` (`domain_block_id`)
+  KEY `owner_pubkey` (`owner_pubkey`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 --

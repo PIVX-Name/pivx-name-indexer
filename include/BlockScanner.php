@@ -9,8 +9,7 @@ use RuntimeException;
 
 /**
  * Reads a range of blocks and finds the commands the protocol carries out in them: the sync of the
- * indexer, and whatever else has to judge the chain by exactly the same rules (the payout agent's
- * reading ahead of its indexer).
+ * indexer, and whatever else has to judge the chain by exactly the same rules.
  *
  * The state each command meets is Protocol's: what Protocol::domainExists() reads, and the domain
  * state it keeps. Every command carried out moves that state on (Protocol::commitDomainState()), so

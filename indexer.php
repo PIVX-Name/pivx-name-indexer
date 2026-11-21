@@ -13,7 +13,6 @@ use Denpa\Bitcoin\Client as RpcClient;
 use Denpa\Bitcoin\Exceptions\ClientException;
 use Denpa\Bitcoin\Responses\BitcoindResponse;
 use GuzzleHttp\Exception\GuzzleException;
-use Telegram\Bot\Api;
 
 require __DIR__ . '/vendor/autoload.php';
 require __DIR__ . '/config.php';
@@ -713,19 +712,7 @@ try {
     // every SYNC_STALL_REMIND_SEC while it does (see fatalToBeTold())
     if ($e->getCode() === INT_EXC_FATAL && fatalToBeTold($e->getMessage()) &&
         NOTIFY_TYPE === 'telegram' && NOTIFY_TG_BOT_KEY !== '' && NOTIFY_TG_USER_ID !== '') {
-        try {
-            $telegram = new Api(NOTIFY_TG_BOT_KEY);
-            $telegram->sendMessage([
-                'chat_id' => NOTIFY_TG_USER_ID,
-                'text' => PROJECT_NAME . ' Name Indexer error: ' . $e->getMessage() . $stopNote
-            ]);
-        } catch (Throwable $e) {
-            logEvent(
-                $e->getMessage(),
-                'Telegram sending error',
-                'indexer.debug'
-            );
-        }
+        sendTelegram(PROJECT_NAME . ' Name Indexer error: ' . $e->getMessage() . $stopNote, 'indexer.debug');
     }
 }
 

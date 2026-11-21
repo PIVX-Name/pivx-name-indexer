@@ -152,7 +152,10 @@ Responses carry `merkle_proof`, `proof_depth`, and `proof_terminal`, which are e
 Anchored checkpoints, newest first. `POST` accepts `order`, `count`, `from_block`.
 
 ### `GET /v1.0/history/{domain}`
-Every recorded state change for a domain. `POST` accepts `order`, `count`, `from_block_id`.
+Every recorded state change for a domain, in block and nonce order, at most 500 at a time. `POST` accepts `order`, `count`, `from_block_id` and `from_nonce`.
+
+* To read it page by page, send the last row of a page back as the cursor: its `domain_block_id` as `from_block_id` and its `nonce` as `from_nonce`. One block can hold several changes of a name, and a page can end among them: with `from_block_id` alone, the next page starts at the next block and skips the rest of that one.
+* `from_nonce` without `from_block_id`, or one that is not a non-negative integer, is the error `One or several params provided have wrong value`.
 
 Sample requests for every endpoint are kept as `.http` files in [`api/dev/`](api/dev/).
 
@@ -181,6 +184,7 @@ Runtime configuration lives in `config/<RELEASE_TYPE>.inc.php`; start from [`con
 | Constant | Notes |
 |:---|:---|
 | `DB_CONFIG` | MySQL connection. |
+| `DB_CONFIG_API` | Optional: the MySQL connection of the API (`api.php`), which only reads, so it can have a user of its own with `GRANT SELECT` on the database alone. Unset, the API uses `DB_CONFIG`. |
 | `RPC_CONFIG` | PIVX Core JSON-RPC connection — host, port, user and password. All four are required; the Docker entrypoint refuses to start without them. An optional `timeout` (seconds) limits each call; without one, `COIN_RPC_TIMEOUT_SEC` (120s) applies. |
 | `EVM_NETWORK` | Chain ID, anchor contract address and ABI path. |
 | `INDEXER_ROCKSDB_PROXY_SOCKET_PATH` | Unix socket of the `rr-proxy` daemon. |

@@ -355,13 +355,33 @@ function nodeLag(RpcClient $rpc, int $staleSec): ?string
 }
 
 /**
- * Sends a message to the indexer's admin, when Telegram is configured (NOTIFY_*). A failure to
- * send is only logged: no message is worth stopping the sync over.
+ * The message of an error from sending to Telegram, fit for a log: without the bot token. When
+ * Telegram can't be reached, the SDK's message ends with the URL it called, and the token is in
+ * it (.../bot<token>/sendMessage).
+ *
+ * @param string $message
+ * @param string $token the bot token to take out
+ * @return string
+ */
+function telegramErrorText(string $message, string $token = NOTIFY_TG_BOT_KEY): string
+{
+    if ($token === '') {
+        return $message;
+    }
+
+    return str_replace([$token, rawurlencode($token)], '<bot token>', $message);
+}
+
+/**
+ * Sends a message to the admin's Telegram, when one is configured (NOTIFY_*). Every message to
+ * the admin of the indexer, the registrar and the registrar API goes through here. A failure to
+ * send is only logged, without the bot token: no message is worth stopping the caller over.
  *
  * @param string $text
+ * @param string $logFile where a failure to send is logged
  * @return void
  */
-function notifyIndexerAdmin(string $text): void
+function sendTelegram(string $text, string $logFile): void
 {
     if (NOTIFY_TYPE !== 'telegram' || NOTIFY_TG_BOT_KEY === '' || NOTIFY_TG_USER_ID === '') {
         return;
@@ -372,11 +392,23 @@ function notifyIndexerAdmin(string $text): void
         $telegram->sendMessage([
             'chat_id' => NOTIFY_TG_USER_ID,
             // Telegram refuses a message over 4096 characters.
-            'text' => mb_substr(PROJECT_NAME . ' Name Indexer: ' . $text, 0, 4000),
+            'text' => mb_substr($text, 0, 4000),
         ]);
     } catch (Throwable $e) {
-        logEvent($e->getMessage(), 'Telegram sending error', 'indexer.debug');
+        logEvent(telegramErrorText($e->getMessage()), 'Telegram sending error', $logFile);
     }
+}
+
+/**
+ * Sends a message to the indexer's admin, when Telegram is configured (NOTIFY_*). A failure to
+ * send is only logged: no message is worth stopping the sync over.
+ *
+ * @param string $text
+ * @return void
+ */
+function notifyIndexerAdmin(string $text): void
+{
+    sendTelegram(PROJECT_NAME . ' Name Indexer: ' . $text, 'indexer.debug');
 }
 
 /**

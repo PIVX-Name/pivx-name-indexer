@@ -52,6 +52,13 @@ if (!defined('WORKLOGS_PATH')) {
     define('WORKLOGS_PATH', dirname(__DIR__, 2) . '/php-worklogs');
 }
 
+// The connection api.php uses: DB_CONFIG unless the release config gives one. The API never
+// writes, so it can have a user of its own that may only read (GRANT SELECT): a fault in the API
+// can then change nothing in the database. See config/release.inc.php.sample.
+if (!defined('DB_CONFIG_API')) {
+    define('DB_CONFIG_API', DB_CONFIG);
+}
+
 // --- EVM reorg safety -------------------------------------------------------------
 //
 // Both halves must refuse to treat an EVM block as settled until the chain says it is.

@@ -124,7 +124,7 @@ function startRrProxy(): mixed
  * (config/test.inc.php): the test database, rr-proxy at $rrSocket, logs in $logs, the anchor
  * contract on chain 56 at epoch $expectedEpoch, and the coin node's JSON-RPC on port $nodePort
  * (1: none answers). Nothing of a real deployment comes along: no config, lock or cache file, and
- * not the registrar or the agent.
+ * not the registrar or its API server.
  *
  * @return string the copy's path
  */
@@ -135,7 +135,7 @@ function indexerCopy(string $dir, string $rrSocket, string $logs, int $expectedE
     @mkdir($logs, 0777, true);
     $name = basename(BASE);
     $exclude = '';
-    foreach (['config/*.php', 'registrar', 'registrar-payout-agent', 'resources/*.lock', 'resources/api_*', 'release_type', '1.php'] as $path) {
+    foreach (['config/*.php', 'registrar', 'registrar-api', 'resources/*.lock', 'resources/api_*', 'release_type', '1.php'] as $path) {
         $exclude .= ' --exclude=' . escapeshellarg($name . '/' . $path);
     }
     exec('cd ' . escapeshellarg(dirname(BASE)) . ' && tar -c' . $exclude . ' --exclude=.git ' . escapeshellarg($name) .

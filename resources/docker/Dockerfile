@@ -187,9 +187,8 @@ RUN set -eux; \
     printf '#!/bin/sh\ncd /opt/pivx-name-indexer || exit 1\nexec php indexer.php "$@"\n' > /usr/local/bin/indexer; \
     chmod 0755 /usr/local/bin/indexer; \
     mkdir -p /var/log/indexer /opt/rr-proxy/db /run/php /run/mysqld; \
-    # resources/ too: the API writes its anchored-root cache and lock there as
-    # www-data. indexer.php already writes resources/sync.lock, but cron runs it as
-    # root, so this directory had never needed to be writable by the web user.
+    # resources/ too: the API writes its anchored-root cache and lock there, and
+    # indexer.php its resources/sync.lock; both run as www-data (see indexer-cron).
     chown -R www-data:www-data /var/log/indexer /opt/rr-proxy \
         /opt/pivx-name-indexer/resources; \
     chown -R mysql:mysql /run/mysqld

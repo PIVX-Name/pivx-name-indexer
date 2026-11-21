@@ -21,3 +21,17 @@ User=www-data
 Group=www-data
 WorkingDirectory=/var/www/pivx-name-indexer
 ExecStart=/usr/bin/php indexer.php sync
+
+# Hardening nothing here needs more than: no privileges gained through setuid binaries or file
+# capabilities, a /tmp of its own, /usr, /boot and /etc read-only, the kernel's settings out of
+# reach. Not ProtectHome (a tree deployed under /home), nor ProtectSystem=strict, which needs
+# ReadWritePaths= for resources/ and WORKLOGS_PATH. rr-proxy's socket is under /run (see
+# INDEXER_ROCKSDB_PROXY_SOCKET_PATH in config/release.inc.php.sample), not in /tmp.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes

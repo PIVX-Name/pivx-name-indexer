@@ -8,6 +8,17 @@ const DB_CONFIG = [
     'db_name' => '{:db_name:}',
 ];
 
+// Optional: a user of its own for the API (api.php), which only reads. Unset, the API uses
+// DB_CONFIG.
+//   CREATE USER '{:db_user:}_api'@'{:db_host:}' IDENTIFIED BY '...';
+//   GRANT SELECT ON `{:db_name:}`.* TO '{:db_user:}_api'@'{:db_host:}';
+// const DB_CONFIG_API = [
+//     'host' => '127.0.0.1:3306',
+//     'user' => '{:db_user:}_api',
+//     'pass' => '...',
+//     'db_name' => '{:db_name:}',
+// ];
+
 const RPC_CONFIG = [
     'scheme' => 'http',
     'host' => '{:rpc_host:}',
@@ -65,7 +76,8 @@ const EVM_BATCH_SIZE = {:evm_batch_size:};
 // PIVX network this deployment speaks. MUST match the circuit the prover was built with:
 //   'mainnet' -> plain `cargo prove build`      (addresses ps1…,  marker PiNS:1:)
 //   'testnet' -> `cargo prove build --features testnet` (pts1…, marker tPiNS:1:)
-// Derived from the INCOME_WALLET prefix below (ps1… here, pts1… on testnet) when this file was generated.
+// Fixed to mainnet in this template, as INCOME_WALLET below is (ps1…): a testnet deployment sets
+// both itself (pts1…).
 const COIN_NETWORK = 'mainnet';
 
 const INCOME_WALLET = 'ps1rf97n020fhwycx2nnxfm97ufeyygk9q64h96e5dx304lreg9zl53sas6g3c9gnlfpqw5s4u3zsh';

@@ -86,8 +86,7 @@ check(($col['EXTRA'] ?? '') === 'STORED GENERATED' && ($col['COLUMN_TYPE'] ?? ''
 $idx = static fn(string $table, string $name): array => $q("SELECT NON_UNIQUE, COLUMN_NAME FROM information_schema.statistics
     WHERE table_schema = DATABASE() AND table_name = '$table' AND index_name = '$name'");
 check(($idx('domains', 'domain_key')[0]['NON_UNIQUE'] ?? null) === 0, 'domains: a unique key on domain_key');
-check(($idx('domains_history', 'domain_block_id')[0]['COLUMN_NAME'] ?? '') === 'domain_block_id',
-    'domains_history: a key on domain_block_id');
+check($idx('domains_history', 'domain_block_id') === [], 'domains_history: no key of its own on domain_block_id');
 check(($idx('checkpoints', 'smt_root')[0]['COLUMN_NAME'] ?? '') === 'smt_root', 'checkpoints: a key on smt_root');
 
 section('Database inserts: one row, many rows, their ON DUPLICATE KEY UPDATE');

@@ -205,8 +205,8 @@ ALTER USER IF EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY $(sql_str "$DB_PASSW
 ALTER USER IF EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY $(sql_str "$DB_PASSWORD");
 SQL
 
-# Schema additions for a database created before them. The import above runs on the first start
-# only, so a node that already has its tables gets each addition here. Each is checked first,
+# Schema changes for a database created before them. The import above runs on the first start
+# only, so a node that already has its tables gets each change here. Each is checked first,
 # so this is a no-op on every start after.
 SMT_ROOT_KEY=$(mysql --protocol=socket -u root -N -e \
   "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = '${DB_NAME}' AND table_name = 'checkpoints' AND index_name = 'smt_root';")
@@ -223,9 +223,10 @@ if [ "$DOMAIN_KEY_COLUMN" = "0" ]; then
 fi
 DOMAIN_BLOCK_KEY=$(mysql --protocol=socket -u root -N -e \
   "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = '${DB_NAME}' AND table_name = 'domains_history' AND index_name = 'domain_block_id';")
-if [ "$DOMAIN_BLOCK_KEY" = "0" ]; then
-    log "adding the domain_block_id key to domains_history"
-    mysql --protocol=socket -u root "$DB_NAME" -e 'ALTER TABLE `domains_history` ADD KEY `domain_block_id` (`domain_block_id`);'
+# 1.3.0 added this key for reads by block range that nothing makes (see schema.sql): dropped.
+if [ "$DOMAIN_BLOCK_KEY" != "0" ]; then
+    log "dropping the unused domain_block_id key of domains_history"
+    mysql --protocol=socket -u root "$DB_NAME" -e 'ALTER TABLE `domains_history` DROP KEY `domain_block_id`;'
 fi
 
 # --- rr-proxy ---------------------------------------------------------------------------

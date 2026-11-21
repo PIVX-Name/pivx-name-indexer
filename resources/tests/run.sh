@@ -1,6 +1,6 @@
 #!/bin/bash
 # The indexer's tests. Needs php (the indexer's own version and extensions, `composer install` done)
-# and mysqld + mysql (MySQL 8.4). Starts a throwaway mysqld of its own under a temporary directory,
+# and mysqld + mysql (MySQL 8.4 or 9.7). Starts a throwaway mysqld of its own under a temporary directory,
 # loads resources/schema.sql into it, runs every test, and removes it all again: nothing of a real
 # deployment (config, database, rr-proxy) is read or touched.
 #
@@ -30,7 +30,8 @@ M="mysql -uroot -S $T/mysql.sock"
 # A fresh database from the schema, for each test that needs one.
 fresh_db() {
     $M -e "DROP DATABASE IF EXISTS t; CREATE DATABASE t; CREATE USER IF NOT EXISTS t@'127.0.0.1' IDENTIFIED BY 't';
-        GRANT ALL ON t.* TO t@'127.0.0.1'; GRANT XA_RECOVER_ADMIN ON *.* TO t@'127.0.0.1';" &&
+        GRANT ALL ON t.* TO t@'127.0.0.1'; GRANT XA_RECOVER_ADMIN ON *.* TO t@'127.0.0.1';
+        CREATE USER IF NOT EXISTS tro@'127.0.0.1' IDENTIFIED BY 'tro'; GRANT SELECT ON t.* TO tro@'127.0.0.1';" &&
         $M t < "$BASE/resources/schema.sql"
 }
 export TEST_DB_HOST=127.0.0.1 TEST_DB_PORT=$PORT TEST_DB_NAME=t TEST_LOGS=$T/logs
@@ -49,7 +50,10 @@ for net in mainnet testnet; do
     fresh_db && run env NET=$net php "$HERE/protocol_test.php"
 done
 run php "$HERE/evm_redact_test.php"
+run php "$HERE/telegram_redact_test.php"
 fresh_db && run php "$HERE/db_test.php"
+# A log of its own: it kills its own connections, and the queries that then fail are logged on purpose.
+mkdir -p "$T/logs/xa" && fresh_db && run env TEST_LOGS="$T/logs/xa" php "$HERE/xa_test.php"
 fresh_db && run env TEST_TMP="$T" php "$HERE/epoch_gate_test.php"
 
 if [ -n "${RR_PROXY:-}" ]; then
