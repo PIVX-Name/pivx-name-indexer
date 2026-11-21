@@ -9,8 +9,8 @@
 # It needs no PIVX node and no EVM endpoint: the container is started with an RPC address
 # nothing listens on and EVM endpoints nothing listens on, which is enough for every service to
 # come up, the database to be created and the API to answer from it. What it checks:
-#   - every PHP file in the image parses, and nothing of a working tree (the registrar, the
-#     agent, tests, git) is in it;
+#   - every PHP file in the image parses, and nothing of a working tree (the registrar, its API
+#     server, tests, git) is in it;
 #   - the configuration from the environment: EXPECTED_EPOCH "0" and "abc" refused, junk numbers
 #     made safe, DEBUG read;
 #   - a first start cut short (mysqld and rr-proxy killed before `indexer clean confirm`), then
@@ -138,7 +138,7 @@ else
     bad "php -l"
 fi
 held="$("$ENGINE" run --rm --entrypoint sh "$IMAGE" -c \
-    'cd /opt/pivx-name-indexer && for p in registrar registrar-payout-agent resources/tests .git .github 1.php release_type; do
+    'cd /opt/pivx-name-indexer && for p in registrar registrar-api resources/tests .git .github 1.php release_type; do
         [ -e "$p" ] && echo "$p"; done; true')"
 [ -z "$held" ] && ok "nothing of a working tree in the image" || bad "the image holds: $held"
 

@@ -9,13 +9,13 @@
 config/*.inc.php
 !config/release.inc.php.sample
 
-# The registrar and the payout agent are programs of their own, run on their own hosts, and not
+# The registrar and its API server are programs of their own, run on their own hosts, and not
 # part of this image. In a working tree they sit inside this one (each is its own git
-# repository, gitignored here), holding real configs (node RPC logins), batches and git
-# history: a `docker build` from such a tree took all of it into the image. CI builds from a
-# clean checkout, which has neither, so this is for a local build.
+# repository, gitignored here), holding real configs (node RPC logins), batches and git history:
+# a `docker build` from such a tree took all of it into the image. CI builds from a clean
+# checkout, which has none of them, so this is for a local build.
 registrar
-registrar-payout-agent
+registrar-api
 
 # Selects which of the above to load. The entrypoint writes its own, and a stale "local"
 # here would make the container ignore the config it just generated.

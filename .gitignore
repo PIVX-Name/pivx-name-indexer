@@ -2,7 +2,7 @@
 /.idea/
 /vendor/
 /registrar/
-/registrar-payout-agent/
+/registrar-api/
 /config/*.php
 release_type
 *.bak
